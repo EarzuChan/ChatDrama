@@ -1,28 +1,42 @@
 package me.earzuchan.chatdrama.client
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.layout.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.dp
-import me.earzuchan.chatdrama.client.laztfont.LazyText
+import androidx.navigation3.runtime.NavEntry
+import androidx.navigation3.ui.NavDisplay
+import me.earzuchan.chatdrama.client.di.clientModules
+import me.earzuchan.chatdrama.client.navigation.RootRoute
 import me.earzuchan.chatdrama.client.ui.ClientTheme
-import top.yukonga.miuix.kmp.basic.Button
-import top.yukonga.miuix.kmp.basic.Scaffold
+import me.earzuchan.chatdrama.client.ui.screen.ChatScreen
+import me.earzuchan.chatdrama.client.ui.screen.MainScreen
+import me.earzuchan.chatdrama.client.viewmodel.RootViewModel
+import org.koin.compose.KoinApplication
+import org.koin.compose.viewmodel.koinViewModel
+import org.koin.core.annotation.KoinExperimentalAPI
+import org.koin.dsl.koinConfiguration
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
+@OptIn(KoinExperimentalAPI::class)
 @Composable
 @Preview
-fun Client() = ClientTheme {
-    Scaffold {
-        Column(Modifier.safeContentPadding().padding(64.dp).fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
-            var showContent by remember { mutableStateOf(false) }
-            val greeting = remember { Greeting.greet }
+fun Client() = KoinApplication(koinConfiguration { modules(clientModules) }) { ClientTheme { Root() } }
 
-            Button({ showContent = !showContent }) { LazyText("点这一块") }
+@Composable
+private fun Root(vm: RootViewModel = koinViewModel()) {
+    val backStack = remember { mutableStateListOf<RootRoute>(RootRoute.Main) }
 
-            AnimatedVisibility(showContent) { Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) { LazyText(greeting) } }
+    NavDisplay(backStack, Modifier.fillMaxSize().background(MiuixTheme.colorScheme.background), onBack = { if (backStack.size > 1) backStack.removeLastOrNull() }) { route ->
+        NavEntry(route) {
+            when (route) {
+                RootRoute.Main -> MainScreen(onOpenChat = { vm.openChat(backStack, it) })
+
+                is RootRoute.Chat -> ChatScreen(route.id) { backStack.removeLastOrNull() }
+            }
         }
     }
 }

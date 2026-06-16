@@ -8,6 +8,7 @@ plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
+    alias(libs.plugins.kotlinSerialization)
 }
 
 kotlin {
@@ -15,26 +16,47 @@ kotlin {
         browser()
         binaries.executable()
     }
-    
+
     @OptIn(ExperimentalWasmDsl::class)
     wasmJs {
         browser()
         binaries.executable()
     }
-    
-    
+
     sourceSets {
         commonMain.dependencies {
             implementation(libs.compose.runtime)
-
+            implementation(libs.compose.foundation)
+            implementation(libs.compose.ui)
             implementation(libs.compose.components.resources)
             implementation(libs.compose.uiToolingPreview)
 
+            implementation(libs.datastore.core)
+            implementation(libs.datastore.preferences.core)
+
+            implementation(libs.koin.core)
+            implementation(libs.koin.compose)
+            implementation(libs.koin.compose.navigation3)
+            implementation(libs.koin.compose.viewmodel)
+
+            implementation(libs.kotlinx.serialization.json)
+
+            implementation(libs.ktor.client.core)
+            implementation(libs.ktor.client.js)
+
+            implementation(libs.lifecycle.viewmodel)
+            implementation(libs.lifecycle.viewmodel.compose)
+
+            implementation(libs.navigation3.ui)
+
+            implementation(libs.room3.runtime)
+            implementation(libs.sqlite.web)
+
             implementation(libs.miuix.ui)
             implementation(libs.miuix.preference)
-
             implementation(libs.miuix.icons)
             implementation(libs.miuix.blur)
+            implementation(libs.miuix.squircle)
         }
 
         jsMain.dependencies {
