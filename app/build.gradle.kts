@@ -1,4 +1,4 @@
-import org.gradle.kotlin.dsl.invoke
+﻿import org.gradle.kotlin.dsl.invoke
 import org.gradle.kotlin.dsl.resources
 import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 
@@ -27,12 +27,14 @@ kotlin {
         commonMain.dependencies {
             implementation(libs.compose.runtime)
 
-            implementation(libs.compose.foundation)
-
-            implementation(libs.compose.ui)
-
             implementation(libs.compose.components.resources)
             implementation(libs.compose.uiToolingPreview)
+
+            implementation(libs.miuix.ui)
+            implementation(libs.miuix.preference)
+
+            implementation(libs.miuix.icons)
+            implementation(libs.miuix.blur)
         }
 
         jsMain.dependencies {
