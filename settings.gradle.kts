@@ -1,4 +1,4 @@
-rootProject.name = "ChatDramaClient"
+rootProject.name = "ChatDrama"
 enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
 
 pluginManagement {
@@ -28,4 +28,5 @@ dependencyResolutionManagement {
     }
 }
 
-include(":app")
+include(":framework")
+include(":client")
