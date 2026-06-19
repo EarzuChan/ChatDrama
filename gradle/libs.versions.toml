@@ -35,7 +35,8 @@ miuix-preference = { module = "top.yukonga.miuix.kmp:miuix-preference", version.
 miuix-icons = { module = "top.yukonga.miuix.kmp:miuix-icons", version.ref = "miuix" }
 miuix-blur = { module = "top.yukonga.miuix.kmp:miuix-blur", version.ref = "miuix" }
 miuix-squircle = { module = "top.yukonga.miuix.kmp:miuix-squircle", version.ref = "miuix" }
-navigation3-ui = { module = "org.jetbrains.androidx.navigation3:navigation3-ui", version.ref = "navigation3" }
+miuix-navy3ui = { module = "top.yukonga.miuix.kmp:miuix-navigation3-ui", version.ref = "miuix" }
+navy3-runtime = { module = "androidx.navigation3:navigation3-runtime", version.ref = "navigation3" }
 room3-runtime = { module = "androidx.room3:room3-runtime", version.ref = "room3" }
 sqlite-web = { module = "androidx.sqlite:sqlite-web", version.ref = "sqlite" }
 wrappers-browser = { module = "org.jetbrains.kotlin-wrappers:kotlin-browser", version.ref = "kotlin-wrappers" }

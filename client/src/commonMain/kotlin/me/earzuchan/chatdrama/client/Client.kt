@@ -2,6 +2,7 @@ package me.earzuchan.chatdrama.client
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeContentPadding
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.Composable
@@ -30,10 +31,10 @@ fun Client() = KoinApplication(koinConfiguration { modules(clientModule) }) { Cl
 private fun Root(vm: RootViewModel = koinViewModel()) {
     val backStack = remember { mutableStateListOf<RootRoute>(RootRoute.Main) }
 
-    NavDisplay(backStack, Modifier.fillMaxSize().background(MiuixTheme.colorScheme.background), onBack = { if (backStack.size > 1) backStack.removeLastOrNull() }) { route ->
+    NavDisplay(backStack, Modifier.safeContentPadding().fillMaxSize().background(MiuixTheme.colorScheme.background), onBack = { if (backStack.size > 1) backStack.removeLastOrNull() }) { route ->
         NavEntry(route) {
             when (route) {
-                RootRoute.Main -> MainScreen(onOpenChat = { vm.openChat(backStack, it) })
+                RootRoute.Main -> MainScreen { vm.openChat(backStack, it) }
 
                 is RootRoute.Chat -> ChatScreen(route.id) { backStack.removeLastOrNull() }
             }

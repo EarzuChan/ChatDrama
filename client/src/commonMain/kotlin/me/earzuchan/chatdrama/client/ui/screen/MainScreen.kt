@@ -21,6 +21,7 @@ import top.yukonga.miuix.kmp.icon.extended.Reply
 @Composable
 fun MainScreen(onOpenChat: (String) -> Unit) {
     val vm = koinViewModel<MainScreenViewModel>()
+
     val backStack = remember { mutableStateListOf<MainRoute>(MainRoute.ChatList) }
     val selected = backStack.last()
     val pagerState = rememberPagerState(selected.index) { MainRoute.routes.size }
@@ -28,12 +29,15 @@ fun MainScreen(onOpenChat: (String) -> Unit) {
     LaunchedEffect(pagerState) { snapshotFlow { pagerState.settledPage }.collect { page -> vm.selectTab(backStack, MainRoute.of(page)) } }
     LaunchedEffect(selected) { if (pagerState.settledPage != selected.index) pagerState.animateScrollToPage(selected.index) }
 
-    Scaffold(topBar = { TopAppBar(selected.title) }, bottomBar = { MainNavigationBar(selected) { vm.selectTab(backStack, it) } }) { padding ->
+    val scrollBehavior = MiuixScrollBehavior()
+    val scrollConnection = scrollBehavior.nestedScrollConnection
+
+    Scaffold(topBar = { TopAppBar(selected.title, scrollBehavior = scrollBehavior) }, bottomBar = { MainNavigationBar(selected) { vm.selectTab(backStack, it) } }) { padding ->
         HorizontalPager(pagerState, Modifier.fillMaxSize().padding(padding), key = { MainRoute.of(it) }) { page ->
             when (MainRoute.of(page)) {
-                MainRoute.ChatList -> ChatListPage(onOpenChat, Modifier.fillMaxSize())
+                MainRoute.ChatList -> ChatListPage(onOpenChat, scrollConnection)
 
-                MainRoute.My -> MyPage(Modifier.fillMaxSize())
+                MainRoute.My -> MyPage(scrollConnection)
             }
         }
     }

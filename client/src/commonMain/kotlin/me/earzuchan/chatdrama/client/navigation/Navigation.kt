@@ -20,13 +20,13 @@ sealed interface MainRoute : NavKey {
     @Serializable
     data object ChatList : MainRoute {
         override val index = 0
-        override val title = "Chats"
+        override val title = "聊天"
     }
 
     @Serializable
     data object My : MainRoute {
         override val index = 1
-        override val title = "My"
+        override val title = "我的"
     }
 
     companion object {

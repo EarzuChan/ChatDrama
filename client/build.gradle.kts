@@ -45,7 +45,7 @@ kotlin {
             implementation(libs.lifecycle.viewmodel)
             implementation(libs.lifecycle.viewmodel.compose)
 
-            implementation(libs.navigation3.ui)
+            implementation(libs.navy3.runtime)
 
             implementation(libs.room3.runtime)
 
@@ -54,6 +54,7 @@ kotlin {
             implementation(libs.miuix.icons)
             implementation(libs.miuix.blur)
             implementation(libs.miuix.squircle)
+            implementation(libs.miuix.navy3ui)
         }
 
         webMain.dependencies {
