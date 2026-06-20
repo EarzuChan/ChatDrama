@@ -1,16 +1,19 @@
 package me.earzuchan.chatdrama.client.ui.page
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.onClick
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -24,19 +27,25 @@ import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 
 @Composable
-fun ChatListPage(onOpenChat: (String) -> Unit,scrollConnection: NestedScrollConnection) {
+fun ChatListPage(onOpenChat: (String) -> Unit, scrollConnection: NestedScrollConnection) {
     val vm = koinViewModel<ChatListPageViewModel>()
     val chats by vm.chats.collectAsState()
 
-    LazyColumn(Modifier.fillMaxSize().overScrollVertical().nestedScroll(scrollConnection)) {
+    LazyColumn(Modifier.fillMaxSize().overScrollVertical().nestedScroll(scrollConnection), contentPadding = PaddingValues(top=4.dp)) {
         items(chats, key = { it.title }) { chat ->
-                Column(Modifier.fillMaxWidth().clickable{ onOpenChat(chat.title) }.padding(32.dp,16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically){
-                        Text(chat.title, Modifier.weight(1f,true), MiuixTheme.colorScheme.onBackground, style = MiuixTheme.textStyles.title3)
-                        Text(chat.time, color=MiuixTheme.colorScheme.onBackgroundVariant, style = MiuixTheme.textStyles.footnote1)
+            Row(Modifier.fillMaxWidth().clickable { onOpenChat(chat.title) }.padding(28.dp, 14.dp), Arrangement.spacedBy(12.dp)) {
+                Box(Modifier.size(40.dp).clip(CircleShape).background(MiuixTheme.colorScheme.primary))
+
+                Column(Modifier.fillMaxWidth()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(chat.title, Modifier.weight(1f, true), MiuixTheme.colorScheme.onBackground, style = MiuixTheme.textStyles.paragraph)
+
+                        Text(chat.time, color = MiuixTheme.colorScheme.onBackgroundVariant, style = MiuixTheme.textStyles.footnote1)
                     }
-                    Text(chat.preview, style = MiuixTheme.textStyles.paragraph, color = MiuixTheme.colorScheme.onBackgroundVariant)
+
+                    Text(chat.preview, style = MiuixTheme.textStyles.body2, color = MiuixTheme.colorScheme.onBackgroundVariant)
                 }
+            }
         }
     }
 }

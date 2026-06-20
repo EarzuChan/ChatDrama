@@ -12,6 +12,7 @@ import androidx.compose.ui.unit.dp
 import me.earzuchan.chatdrama.client.utils.platform
 import me.earzuchan.chatdrama.client.viewmodel.MyPageViewModel
 import org.koin.compose.viewmodel.koinViewModel
+import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.preference.SwitchPreference
@@ -24,16 +25,8 @@ fun MyPage(scrollConnection: NestedScrollConnection) {
 
     val switchEnabled by vm.switchState.collectAsState()
 
-    LazyColumn(Modifier.fillMaxSize().overScrollVertical().nestedScroll(scrollConnection), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        item {
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("恩情", style = MiuixTheme.textStyles.title2)
-                    Spacer(Modifier.height(8.dp))
-                    Text("当前平台：$platform")
-                }
-            }
-        }
+    LazyColumn(Modifier.fillMaxSize().overScrollVertical().nestedScroll(scrollConnection), contentPadding = PaddingValues(top=4.dp, start = 12.dp, end = 12.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item { Card { BasicComponent(title = "恩情", summary = "当前平台：$platform") } }
 
         item{ Card { SwitchPreference(switchEnabled, { vm.setSwitchState(it) }, "南下") } }
     }
