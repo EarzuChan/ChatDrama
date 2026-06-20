@@ -1,0 +1,8 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "chat-drama",
+  "compatibility_date": "2026-06-19",
+  "assets": {
+    "directory": "client/build/dist/composeWebCompatibility/productionExecutable"
+  }
+}
