@@ -25,11 +25,12 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @OptIn(KoinExperimentalAPI::class)
 @Composable
-@Preview
 fun Client() = KoinApplication(koinConfiguration { modules(clientModule) }) { ClientTheme { Root() } }
 
 @Composable
-private fun Root(vm: RootViewModel = koinViewModel()) {
+private fun Root() {
+    val vm: RootViewModel = koinViewModel()
+
     val backStack = remember { mutableStateListOf<RootRoute>(RootRoute.Main) }
 
     BindRootBrowserNavigation(backStack)

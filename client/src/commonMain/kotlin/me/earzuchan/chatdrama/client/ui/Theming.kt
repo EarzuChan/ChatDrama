@@ -9,7 +9,7 @@ import top.yukonga.miuix.kmp.theme.ThemeController
 
 @Composable
 fun ClientTheme(content: @Composable () -> Unit) {
-    val controller = remember { ThemeController(ColorSchemeMode.Dark) }
+    val controller = remember { ThemeController(ColorSchemeMode.System) }
 
     return MiuixTheme(controller, content = content)
 }
