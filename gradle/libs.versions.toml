@@ -10,6 +10,7 @@ ktor = "3.5.0"
 lifecycle = "2.11.0-beta02"
 miuix = "0.9.2"
 navigation3 = "1.2.0-alpha01"
+navigation3-browser = "1.1.0"
 room3 = "3.0.0-alpha06"
 sqlite = "2.7.0-alpha06"
 
@@ -36,6 +37,7 @@ miuix-icons = { module = "top.yukonga.miuix.kmp:miuix-icons", version.ref = "miu
 miuix-blur = { module = "top.yukonga.miuix.kmp:miuix-blur", version.ref = "miuix" }
 miuix-squircle = { module = "top.yukonga.miuix.kmp:miuix-squircle", version.ref = "miuix" }
 miuix-navy3ui = { module = "top.yukonga.miuix.kmp:miuix-navigation3-ui", version.ref = "miuix" }
+navigation3-browser = { module = "com.github.terrakok:navigation3-browser", version.ref = "navigation3-browser" }
 navy3-runtime = { module = "androidx.navigation3:navigation3-runtime", version.ref = "navigation3" }
 room3-runtime = { module = "androidx.room3:room3-runtime", version.ref = "room3" }
 sqlite-web = { module = "androidx.sqlite:sqlite-web", version.ref = "sqlite" }

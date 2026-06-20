@@ -58,6 +58,7 @@ kotlin {
         }
 
         webMain.dependencies {
+            implementation(libs.navigation3.browser)
             implementation(libs.ktor.client.js)
             implementation(libs.sqlite.web)
         }

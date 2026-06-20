@@ -11,6 +11,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.navigation3.runtime.NavEntry
 import androidx.navigation3.ui.NavDisplay
 import me.earzuchan.chatdrama.client.di.clientModule
+import me.earzuchan.chatdrama.client.navigation.BindRootBrowserNavigation
 import me.earzuchan.chatdrama.client.navigation.RootRoute
 import me.earzuchan.chatdrama.client.ui.ClientTheme
 import me.earzuchan.chatdrama.client.ui.screen.ChatScreen
@@ -30,6 +31,8 @@ fun Client() = KoinApplication(koinConfiguration { modules(clientModule) }) { Cl
 @Composable
 private fun Root(vm: RootViewModel = koinViewModel()) {
     val backStack = remember { mutableStateListOf<RootRoute>(RootRoute.Main) }
+
+    BindRootBrowserNavigation(backStack)
 
     NavDisplay(backStack, Modifier.safeContentPadding().fillMaxSize().background(MiuixTheme.colorScheme.background), onBack = { if (backStack.size > 1) backStack.removeLastOrNull() }) { route ->
         NavEntry(route) {
