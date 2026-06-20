@@ -26,4 +26,12 @@ class ChatScreenViewModel(title: String) : ViewModel() {
     fun setInput(inp: String) {
         _input.value = inp
     }
+
+    fun sendInput() {
+        val content = _input.value.trim()
+        if (content.isEmpty()) return
+
+        _messages.value += DisplayTempFakeMessage(content)
+        _input.value = ""
+    }
 }

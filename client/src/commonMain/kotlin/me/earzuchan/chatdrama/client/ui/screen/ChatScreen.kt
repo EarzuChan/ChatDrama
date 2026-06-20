@@ -3,10 +3,11 @@ package me.earzuchan.chatdrama.client.ui.screen
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -38,18 +39,20 @@ fun ChatScreen(title: String, onBack: () -> Unit) {
     val messages by vm.messages.collectAsState()
     val input by vm.input.collectAsState()
 
-    val scrollBehavior = MiuixScrollBehavior()
+    val listState = rememberLazyListState(messages.lastIndex.coerceAtLeast(0)) // 确保默认最后
+    LaunchedEffect(messages.size) { if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex) }
 
+    val scrollBehavior = MiuixScrollBehavior()
     val backdrop = rememberBlurBackdrop()
 
     Scaffold(containerColor = MiuixTheme.colorScheme.surface, topBar = { SmallTopAppBar(title, Modifier.attachBarBlur(backdrop), Color.Transparent, scrollBehavior = scrollBehavior, navigationIcon = { IconButton(onBack) { Icon(MiuixIcons.Back, "返回") } }) }, bottomBar = {
         Row(Modifier.fillMaxWidth().attachBarBlur(backdrop).padding(12.dp, 16.dp), Arrangement.spacedBy(8.dp), Alignment.CenterVertically) {
             BarIconButton(MiuixIcons.Demibold.Add)
             MessageTextField(input, { vm.setInput(it) }, Modifier.weight(1f, true), "消息")
-            BarIconMainButton(MiuixIcons.Demibold.Send, input.isNotEmpty())
+            BarIconMainButton(MiuixIcons.Demibold.Send, input.isNotBlank()) { vm.sendInput() }
         }
     }) { padding ->
-        LazyColumn(Modifier.fillMaxSize().overScrollVertical().nestedScroll(scrollBehavior.nestedScrollConnection).layerBackdrop(backdrop), contentPadding = padding + PaddingValues(start = 12.dp, end = 12.dp, bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        LazyColumn(Modifier.fillMaxSize().overScrollVertical().nestedScroll(scrollBehavior.nestedScrollConnection).layerBackdrop(backdrop), listState, padding + PaddingValues(start = 12.dp, end = 12.dp, bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(messages) { FakeMessageItem(it) }
         }
     }
@@ -63,5 +66,5 @@ private fun BarIconMainButton(icon: ImageVector, active: Boolean = false, onClic
     val background = if (active) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurface.copy(0.16f)
     val foreground = if (active) MiuixTheme.colorScheme.onPrimary else MiuixTheme.colorScheme.disabledOnSurface
 
-    IconButton(onClick, backgroundColor = background) { Icon(icon, null, tint = foreground) }
+    IconButton(onClick, enabled = active, backgroundColor = background) { Icon(icon, null, tint = foreground) }
 }
