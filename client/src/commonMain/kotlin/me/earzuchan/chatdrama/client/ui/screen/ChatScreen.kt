@@ -11,7 +11,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.unit.dp
@@ -24,8 +23,6 @@ import org.koin.compose.viewmodel.koinViewModel
 import org.koin.core.parameter.parametersOf
 import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.blur.layerBackdrop
-import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
-import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Add
 import top.yukonga.miuix.kmp.icon.extended.Back
@@ -36,7 +33,7 @@ import top.yukonga.miuix.kmp.utils.overScrollVertical
 @Composable
 fun ChatScreen(title: String, onBack: () -> Unit) {
     val vm = koinViewModel<ChatScreenViewModel>(key = title) { parametersOf(title) }
-    val messages by vm.messages.collectAsState()
+    val messages by vm.messages.collectAsState(emptyList())
     val input by vm.input.collectAsState()
 
     val listState = rememberLazyListState(messages.lastIndex.coerceAtLeast(0)) // 确保默认最后

@@ -8,7 +8,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import me.earzuchan.chatdrama.client.viewmodel.DisplayTempFakeMessage
+import me.earzuchan.chatdrama.client.data.model.DisplayTempFakeMessage
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.squircle.squircleBackground
 import top.yukonga.miuix.kmp.theme.MiuixTheme
