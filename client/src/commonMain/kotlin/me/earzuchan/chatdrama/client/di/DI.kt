@@ -2,6 +2,7 @@ package me.earzuchan.chatdrama.client.di
 
 import me.earzuchan.chatdrama.client.data.store.TempFakeChatStore
 import me.earzuchan.chatdrama.client.viewmodel.*
+import org.koin.core.module.Module
 import org.koin.dsl.module
 import org.koin.plugin.module.dsl.single
 import org.koin.plugin.module.dsl.viewModel
@@ -17,3 +18,5 @@ val clientModule = module {
     viewModel<MyPageViewModel>()
     viewModel<ChatScreenViewModel>()
 }
+
+expect val platformModule : Module

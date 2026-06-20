@@ -33,12 +33,12 @@ fun ChatListPage(onOpenChat: (String) -> Unit, scrollConnection: NestedScrollCon
 
                 Column(Modifier.fillMaxWidth()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(chat.key, Modifier.weight(1f, true), MiuixTheme.colorScheme.onBackground, style = MiuixTheme.textStyles.paragraph)
+                        Text(chat.key, Modifier.weight(1f, true), MiuixTheme.colorScheme.onSurface, style = MiuixTheme.textStyles.paragraph)
 
-                        Text("早些时候", color = MiuixTheme.colorScheme.onBackgroundVariant, style = MiuixTheme.textStyles.footnote1)
+                        Text("早些时候", color = MiuixTheme.colorScheme.onSurfaceVariantSummary, style = MiuixTheme.textStyles.footnote1)
                     }
 
-                    Text(chat.value.lastOrNull()?.content.orEmpty(), style = MiuixTheme.textStyles.body2, color = MiuixTheme.colorScheme.onBackgroundVariant)
+                    Text(chat.value.lastOrNull()?.content.orEmpty(), style = MiuixTheme.textStyles.body2, color = MiuixTheme.colorScheme.onSurfaceVariantActions)
                 }
             }
         }

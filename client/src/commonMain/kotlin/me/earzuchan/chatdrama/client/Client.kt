@@ -3,14 +3,14 @@ package me.earzuchan.chatdrama.client
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.safeContentPadding
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.navigation3.runtime.NavEntry
 import androidx.navigation3.ui.NavDisplay
 import me.earzuchan.chatdrama.client.di.clientModule
+import me.earzuchan.chatdrama.client.di.platformModule
 import me.earzuchan.chatdrama.client.navigation.BindRootBrowserNavigation
 import me.earzuchan.chatdrama.client.navigation.RootRoute
 import me.earzuchan.chatdrama.client.ui.ClientTheme
@@ -25,7 +25,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @OptIn(KoinExperimentalAPI::class)
 @Composable
-fun Client() = KoinApplication(koinConfiguration { modules(clientModule) }) { ClientTheme { Root() } }
+fun Client() = KoinApplication(koinConfiguration { modules(platformModule, clientModule) }) { ClientTheme { Root() } }
 
 @Composable
 private fun Root() {

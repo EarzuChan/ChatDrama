@@ -2,14 +2,11 @@ package me.earzuchan.chatdrama.client.utils
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
-import top.yukonga.miuix.kmp.blur.Backdrop
-import top.yukonga.miuix.kmp.blur.BlendColorEntry
-import top.yukonga.miuix.kmp.blur.BlurDefaults
-import top.yukonga.miuix.kmp.blur.LayerBackdrop
-import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
-import top.yukonga.miuix.kmp.blur.textureBlur
+import top.yukonga.miuix.kmp.blur.*
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.theme.isDarkTheme
 
 // UI
 
@@ -24,4 +21,9 @@ fun rememberBlurBackdrop(): LayerBackdrop {
 }
 
 @Composable
-fun Modifier.attachBarBlur(backdrop: Backdrop) = textureBlur(backdrop, RectangleShape, 25f, colors = BlurDefaults.blurColors(listOf(BlendColorEntry(color = MiuixTheme.colorScheme.surface.copy(0.8f)))))
+fun Modifier.attachTopBarBlur(backdrop: Backdrop) = textureBlur(
+    backdrop, RectangleShape, if (isDarkTheme) 70f else 25f, colors = BlurDefaults.blurColors(
+        if(isDarkTheme) listOf(BlendColorEntry(Color(0x75000000), BlurBlendMode.ColorBurn), BlendColorEntry(Color(0x52000000), BlurBlendMode.SrcOver))
+        else listOf(BlendColorEntry(Color(0x33F9F9F9), BlurBlendMode.Overlay), BlendColorEntry(Color(0xB3F7F7F7), BlurBlendMode.HardLight))
+    )
+)

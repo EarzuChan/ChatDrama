@@ -1,11 +1,13 @@
 package me.earzuchan.chatdrama.client.ui.component
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.unit.dp
 import top.yukonga.miuix.kmp.basic.Text
@@ -16,7 +18,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 fun MessageTextField(value: String, onValueChange: (String) -> Unit, modifier: Modifier = Modifier, placeholder: String = "") {
     val textStyle = MiuixTheme.textStyles.body1.copy(MiuixTheme.colorScheme.onSurface)
 
-    val background = MiuixTheme.colorScheme.onSurface.copy(alpha = 0.17f) // 神秘计算有感觉吗
+    val background = if (isSystemInDarkTheme()) Color.White.copy(alpha = 0.14f) else Color.Black.copy(alpha = 0.06f) // 神秘计算有感觉吗
 
     BasicTextField(
         value, onValueChange, modifier, textStyle = textStyle, cursorBrush = SolidColor(MiuixTheme.colorScheme.primary), decorationBox = { innerTextField ->
