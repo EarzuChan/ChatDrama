@@ -8,7 +8,7 @@ import org.koin.plugin.module.dsl.single
 import org.koin.plugin.module.dsl.viewModel
 
 val clientModule = module {
-    // single { HttpClient(Js) }
+    // Ktor is being provided by the Framework
 
     single<TempFakeChatStore>()
 
@@ -19,4 +19,4 @@ val clientModule = module {
     viewModel<ChatScreenViewModel>()
 }
 
-expect val platformModule : Module
+expect val clientPlatformModule : Module

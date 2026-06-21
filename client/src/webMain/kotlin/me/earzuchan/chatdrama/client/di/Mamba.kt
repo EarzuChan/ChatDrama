@@ -7,7 +7,7 @@ import me.earzuchan.chatdrama.client.data.DATASTORE_FILENAME
 import org.koin.core.module.Module
 import org.koin.dsl.module
 
-actual val platformModule: Module = module {
+actual val clientPlatformModule: Module = module {
     single { createPreferencesDataStore() }
 
     /*

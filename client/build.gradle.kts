@@ -1,12 +1,12 @@
 ﻿import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 
-val appId = "me.earzuchan.chatdrama.client"
+val namespace = "me.earzuchan.chatdrama.client"
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
+    alias(libs.plugins.kotlinSerialization)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
-    alias(libs.plugins.kotlinSerialization)
     alias(libs.plugins.koinCompiler)
 }
 
@@ -24,6 +24,8 @@ kotlin {
 
     sourceSets {
         commonMain.dependencies {
+            implementation(projects.framework)
+            
             implementation(libs.compose.runtime)
             implementation(libs.compose.foundation)
             implementation(libs.compose.ui)
@@ -39,8 +41,6 @@ kotlin {
             implementation(libs.koin.compose.viewmodel)
 
             implementation(libs.kotlinx.serialization.json)
-
-            implementation(libs.ktor.client.core)
 
             implementation(libs.lifecycle.viewmodel)
             implementation(libs.lifecycle.viewmodel.compose)
@@ -59,7 +59,6 @@ kotlin {
 
         webMain.dependencies {
             implementation(libs.navigation3.browser)
-            implementation(libs.ktor.client.js)
             implementation(libs.sqlite.web)
         }
 
@@ -71,7 +70,7 @@ kotlin {
 
 compose {
     resources {
-        packageOfResClass = "$appId.resources"
+        packageOfResClass = "$namespace.resources"
         generateResClass = auto
     }
 }

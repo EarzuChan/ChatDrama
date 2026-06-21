@@ -19,3 +19,5 @@ captures
 node_modules/
 kotlin-js-store/
 .tmp_*/
+framework/src/commonTest/kotlin/me/earzuchan/chatdrama/framework/llm/LlmKeys.kt
+framework/karma.config.d

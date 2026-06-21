@@ -35,7 +35,7 @@ stateDiagram-v2
   RESPONSE_WINDOW --> CLOSED: 用户窗关闭
   CLOSED --> [*]
 
-  PRESENTING --> INTERRUPTED: 用户前台打断
+  PRESENTING --> INTERRUPTED: 用户打断
   INTERRUPTED --> RECOMPOSING
   RECOMPOSING --> STAGED
 ```
@@ -187,7 +187,7 @@ data class PhaseCompletionSpec(
     "requiredReveals": ["AILIN_WENT_TO_OLD_STATION"],
     "maxBeats": 3
   },
-  "responseWindow": {
+  "ResponsePhase": {
     "durationSeconds": 60,
     "allowMultipleBubbles": true
   }

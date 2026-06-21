@@ -10,13 +10,15 @@ import androidx.compose.ui.Modifier
 import androidx.navigation3.runtime.NavEntry
 import androidx.navigation3.ui.NavDisplay
 import me.earzuchan.chatdrama.client.di.clientModule
-import me.earzuchan.chatdrama.client.di.platformModule
+import me.earzuchan.chatdrama.client.di.clientPlatformModule
 import me.earzuchan.chatdrama.client.navigation.BindRootBrowserNavigation
 import me.earzuchan.chatdrama.client.navigation.RootRoute
 import me.earzuchan.chatdrama.client.ui.ClientTheme
 import me.earzuchan.chatdrama.client.ui.screen.ChatScreen
 import me.earzuchan.chatdrama.client.ui.screen.MainScreen
 import me.earzuchan.chatdrama.client.viewmodel.RootViewModel
+import me.earzuchan.chatdrama.framework.di.frameworkModule
+import me.earzuchan.chatdrama.framework.di.frameworkPlatformModule
 import org.koin.compose.KoinApplication
 import org.koin.compose.viewmodel.koinViewModel
 import org.koin.core.annotation.KoinExperimentalAPI
@@ -25,7 +27,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @OptIn(KoinExperimentalAPI::class)
 @Composable
-fun Client() = KoinApplication(koinConfiguration { modules(platformModule, clientModule) }) { ClientTheme { Root() } }
+fun Client() = KoinApplication(koinConfiguration { modules(frameworkModule, frameworkPlatformModule, clientModule, clientPlatformModule) }) { ClientTheme { Root() } }
 
 @Composable
 private fun Root() {
