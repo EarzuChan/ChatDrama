@@ -1201,8 +1201,15 @@ private fun geminiGenerationConfig(request: LlmRequest) = buildJsonObject {
 private fun geminiThinkingConfig(reasoning: ReasoningMode) = when (reasoning) {
     ReasoningMode.Default -> null
     ReasoningMode.Off -> buildJsonObject { put("thinkingBudget", 0) }
-    is ReasoningMode.Effort -> buildJsonObject { put("thinkingBudget", reasoning.level.defaultGeminiThinkingBudget()) }
-    is ReasoningMode.BudgetTokens -> buildJsonObject { put("thinkingBudget", reasoning.tokens) }
+    is ReasoningMode.Effort -> buildJsonObject {
+        put("thinkingBudget", reasoning.level.defaultGeminiThinkingBudget())
+        put("includeThoughts", true)
+    }
+
+    is ReasoningMode.BudgetTokens -> buildJsonObject {
+        put("thinkingBudget", reasoning.tokens)
+        if (reasoning.tokens != 0) put("includeThoughts", true)
+    }
 }
 
 private fun parseOpenAiChatResponse(raw: KtJsonObject, fallbackModel: String): LlmResponse {

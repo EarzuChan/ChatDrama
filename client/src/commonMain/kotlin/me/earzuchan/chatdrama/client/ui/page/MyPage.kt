@@ -70,8 +70,8 @@ fun MyPage(scrollConnection: NestedScrollConnection) {
 
 private val LlmProvider.displayName: String
     get() = when (this) {
-        LlmProvider.OpenAiLegacy -> "OpenAI Chat Completions"
-        LlmProvider.OpenAiResponses -> "OpenAI Responses"
+        LlmProvider.OpenAiLegacy -> "OpenAI 经典API"
+        LlmProvider.OpenAiResponses -> "OpenAI 新API"
         LlmProvider.Claude -> "Claude"
         LlmProvider.Gemini -> "Gemini"
     }

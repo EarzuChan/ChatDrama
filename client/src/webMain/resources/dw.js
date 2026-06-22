@@ -95,14 +95,15 @@ function normalizeBinding(value) {
 async function stepStatement(statementId, bindings) {
   const sqlite = await sqlite3()
   const { stmt } = getStatement(statementId)
-  const rows = []
-  let columnTypes = []
 
   bindStatement(stmt, bindings)
 
+  const rows = []
+  let columnTypes = []
+
   while (stmt.step()) {
-    if (columnTypes.length === 0) columnTypes = readColumnTypes(sqlite, stmt)
     rows.push(stmt.get([]))
+    if (columnTypes.length === 0) columnTypes = readColumnTypes(sqlite, stmt)
   }
 
   stmt.reset()

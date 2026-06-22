@@ -2,7 +2,6 @@ package me.earzuchan.chatdrama.client.di
 
 import androidx.datastore.core.DataStoreFactory
 import androidx.datastore.core.okio.WebLocalStorage
-import androidx.datastore.core.okio.WebOpfsStorage
 import androidx.datastore.preferences.core.PreferencesSerializer
 import androidx.room3.Room
 import androidx.sqlite.driver.web.WebWorkerSQLiteDriver

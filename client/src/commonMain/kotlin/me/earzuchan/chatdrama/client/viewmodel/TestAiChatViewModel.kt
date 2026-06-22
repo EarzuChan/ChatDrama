@@ -64,7 +64,9 @@ class TestAiChatViewModel(private val llmSettingsRepository: LlmSettingsReposito
 
                         is LlmEvent.ReasoningDelta -> {
                             thought += event.text
+                            // println("${assistantId}的思考：$thought")
                             aiChatRepository.updateLlmMessage(assistantId, answer, thought.orNull(), isStreaming = true)
+                            // println("VM after update snapshot=${aiChatRepository.snapshot().lastOrNull()}")
                         }
 
                         is LlmEvent.Completed -> {
