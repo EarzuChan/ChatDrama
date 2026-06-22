@@ -1,16 +1,6 @@
 const CACHE_NAME = "chatdrama-pwa-v1"
 
-const APP_SHELL = [
-    "./",
-    "./index.html",
-    "./styles.css",
-    "./manifest.webmanifest",
-    "./icons/favicon-32.png",
-    "./icons/apple-touch-icon.png",
-    "./icons/icon-192.png",
-    "./icons/icon-512.png",
-    "./icons/icon-maskable-512.png"
-]
+const APP_SHELL = ["./", "./index.html", "./styles.css", "./manifest.webmanifest", "./icons/favicon-32.png", "./icons/apple-touch-icon.png", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/icon-maskable-512.png"]
 
 const CACHEABLE_ASSET = /\.(?:css|html|ico|js|json|mjs|otf|png|svg|ttf|wasm|webmanifest|woff2?)$/i
 

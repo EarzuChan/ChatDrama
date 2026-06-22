@@ -17,19 +17,43 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.unit.dp
 import me.earzuchan.chatdrama.client.viewmodel.ChatListPageViewModel
 import org.koin.compose.viewmodel.koinViewModel
+import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Contacts
+import top.yukonga.miuix.kmp.icon.extended.Messages
+import top.yukonga.miuix.kmp.icon.extended.Reply
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 
 @Composable
-fun ChatListPage(onOpenChat: (String) -> Unit, scrollConnection: NestedScrollConnection) {
+fun ChatListPage(onOpenChat: (String) -> Unit, onOpenAiChat: () -> Unit, scrollConnection: NestedScrollConnection) {
     val vm = koinViewModel<ChatListPageViewModel>()
     val chats by vm.chats.collectAsState()
 
     LazyColumn(Modifier.fillMaxSize().overScrollVertical().nestedScroll(scrollConnection), contentPadding = PaddingValues(top=4.dp)) {
+        item { // Temp Ai
+            Row(Modifier.fillMaxWidth().clickable(onClick = onOpenAiChat).padding(28.dp, 14.dp), Arrangement.spacedBy(12.dp), Alignment.CenterVertically) {
+                Box(Modifier.size(40.dp).clip(CircleShape).background(MiuixTheme.colorScheme.primary), Alignment.Center) {
+                    Icon(MiuixIcons.Reply, null, tint = MiuixTheme.colorScheme.onPrimary)
+                }
+
+                Column(Modifier.fillMaxWidth()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("AI 聊天测试", Modifier.weight(1f, true), MiuixTheme.colorScheme.onSurface, style = MiuixTheme.textStyles.paragraph)
+                        Text("LLM", color = MiuixTheme.colorScheme.onSurfaceVariantSummary, style = MiuixTheme.textStyles.footnote1)
+                    }
+
+                    Text("仅仅是测试一下而已啦，祝玩得开心", style = MiuixTheme.textStyles.body2, color = MiuixTheme.colorScheme.onSurfaceVariantActions)
+                }
+            }
+        }
+
         items(chats.entries.toList(), key = { it.key }) { chat ->
             Row(Modifier.fillMaxWidth().clickable { onOpenChat(chat.key) }.padding(28.dp, 14.dp), Arrangement.spacedBy(12.dp)) {
-                Box(Modifier.size(40.dp).clip(CircleShape).background(MiuixTheme.colorScheme.primary))
+                Box(Modifier.size(40.dp).clip(CircleShape).background(MiuixTheme.colorScheme.primary), Alignment.Center)  {
+                    Icon(MiuixIcons.Contacts, null, tint = MiuixTheme.colorScheme.onPrimary)
+                }
 
                 Column(Modifier.fillMaxWidth()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {

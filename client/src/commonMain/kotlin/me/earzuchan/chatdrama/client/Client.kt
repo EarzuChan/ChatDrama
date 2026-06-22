@@ -16,6 +16,7 @@ import me.earzuchan.chatdrama.client.navigation.RootRoute
 import me.earzuchan.chatdrama.client.ui.ClientTheme
 import me.earzuchan.chatdrama.client.ui.screen.ChatScreen
 import me.earzuchan.chatdrama.client.ui.screen.MainScreen
+import me.earzuchan.chatdrama.client.ui.screen.TestAiChatScreen
 import me.earzuchan.chatdrama.client.viewmodel.RootViewModel
 import me.earzuchan.chatdrama.framework.di.frameworkModule
 import me.earzuchan.chatdrama.framework.di.frameworkPlatformModule
@@ -40,9 +41,14 @@ private fun Root() {
     NavDisplay(backStack, Modifier.safeContentPadding().fillMaxSize().background(MiuixTheme.colorScheme.background), onBack = { if (backStack.size > 1) backStack.removeLastOrNull() }) { route ->
         NavEntry(route) {
             when (route) {
-                RootRoute.Main -> MainScreen { vm.openChat(backStack, it) }
+                RootRoute.Main -> MainScreen(
+                    onOpenChat = { vm.openChat(backStack, it) },
+                    onOpenAiChat = { vm.openAiChat(backStack) },
+                )
 
                 is RootRoute.Chat -> ChatScreen(route.id) { backStack.removeLastOrNull() }
+
+                RootRoute.AiChat -> TestAiChatScreen { backStack.removeLastOrNull() }
             }
         }
     }

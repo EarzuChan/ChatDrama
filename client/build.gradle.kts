@@ -8,6 +8,12 @@ plugins {
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
     alias(libs.plugins.koinCompiler)
+    alias(libs.plugins.room3)
+    alias(libs.plugins.ksp)
+}
+
+room3 {
+    schemaDirectory("$projectDir/schemas")
 }
 
 kotlin {
@@ -66,6 +72,11 @@ kotlin {
             implementation(libs.wrappers.browser)
         }
     }
+}
+
+dependencies {
+    add("kspJs", libs.room3.compiler)
+    add("kspWasmJs", libs.room3.compiler)
 }
 
 compose {

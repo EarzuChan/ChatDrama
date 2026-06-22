@@ -19,7 +19,7 @@ import top.yukonga.miuix.kmp.icon.extended.Messages
 import top.yukonga.miuix.kmp.icon.extended.Reply
 
 @Composable
-fun MainScreen(onOpenChat: (String) -> Unit) {
+fun MainScreen(onOpenChat: (String) -> Unit, onOpenAiChat: () -> Unit) {
     val vm = koinViewModel<MainScreenViewModel>()
 
     val backStack = remember { mutableStateListOf<MainRoute>(MainRoute.ChatList) }
@@ -35,7 +35,7 @@ fun MainScreen(onOpenChat: (String) -> Unit) {
     Scaffold(topBar = { TopAppBar(selected.title, scrollBehavior = scrollBehavior) }, bottomBar = { MainNavigationBar(selected) { vm.selectTab(backStack, it) } }) { padding ->
         HorizontalPager(pagerState, Modifier.fillMaxSize().padding(padding), key = { MainRoute.of(it) }) { page ->
             when (MainRoute.of(page)) {
-                MainRoute.ChatList -> ChatListPage(onOpenChat, scrollConnection)
+                MainRoute.ChatList -> ChatListPage(onOpenChat, onOpenAiChat, scrollConnection)
 
                 MainRoute.My -> MyPage(scrollConnection)
             }

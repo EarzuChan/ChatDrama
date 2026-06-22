@@ -10,6 +10,9 @@ sealed interface RootRoute : NavKey {
 
     @Serializable
     data class Chat(val id: String) : RootRoute
+
+    @Serializable
+    data object AiChat : RootRoute
 }
 
 @Serializable

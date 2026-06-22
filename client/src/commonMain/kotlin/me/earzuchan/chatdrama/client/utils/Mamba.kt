@@ -23,3 +23,15 @@ fun Modifier.attachTopBarBlur(backdrop: Backdrop) = textureBlur(
         else listOf(BlendColorEntry(Color(0x33F9F9F9), BlurBlendMode.Overlay), BlendColorEntry(Color(0xB3F7F7F7), BlurBlendMode.HardLight))
     )
 )
+
+@Composable
+fun Modifier.attachMsgBarBlur(backdrop: Backdrop) = textureBlur(
+    backdrop, RectangleShape, 66f, colors = BlurDefaults.blurColors(
+        if (isDarkTheme) listOf(BlendColorEntry(Color(0x75737373), BlurBlendMode.ColorBurn),BlendColorEntry(Color(0x8A000000), BlurBlendMode.SrcOver),BlendColorEntry(Color(0x0AFFFFFF), BlurBlendMode.SrcOver))
+        else listOf(BlendColorEntry(Color(0xA66B6B6B), BlurBlendMode.ColorDodge), BlendColorEntry(Color(0xCCF5F5F5), BlurBlendMode.SrcOver))
+    )
+)
+
+// MISC
+
+expect fun currentTimeMillis(): Long

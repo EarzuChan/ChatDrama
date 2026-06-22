@@ -8,4 +8,8 @@ class RootViewModel : ViewModel() {
         val route = RootRoute.Chat(chatId)
         if (backStack.lastOrNull() != route) backStack += route
     }
+
+    fun openAiChat(backStack: MutableList<RootRoute>) {
+        if (backStack.lastOrNull() != RootRoute.AiChat) backStack += RootRoute.AiChat
+    }
 }
