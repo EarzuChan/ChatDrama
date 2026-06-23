@@ -22,10 +22,10 @@ class LlmApiIntegrationTest {
     // 这几个有跨域，所以仅在JVM测试
 
     @Test
-    fun openaiLegacyVanyo() = liveTest { onlyJvm { assertEndpointContract(OpenaiLegacyApi(OpenaiLegacyConfig(VANYO_OPENAI_KEY, "gpt5.5", "$VANYO/v1")), "openai legacy / vanyo") } }
+    fun openaiLegacyVanyo() = liveTest { onlyJvm { assertEndpointContract(OpenaiLegacyApi(OpenaiLegacyConfig(VANYO_OPENAI_KEY, "gpt5.5", "$VANYO_BASE_URL/v1")), "openai legacy / vanyo") } }
 
     @Test
-    fun openaiResponsesVanyo() = liveTest { onlyJvm { assertEndpointContract(OpenaiResponsesApi(OpenaiResponsesConfig(VANYO_OPENAI_KEY, "gpt5.5", "$VANYO/v1")), "openai responses / vanyo") } }
+    fun openaiResponsesVanyo() = liveTest { onlyJvm { assertEndpointContract(OpenaiResponsesApi(OpenaiResponsesConfig(VANYO_OPENAI_KEY, "gpt5.5", "$VANYO_BASE_URL/v1")), "openai responses / vanyo") } }
     
     @Test
     fun claudeOpenRouter() = liveTest { onlyJvm { allowRegionalFailure("claude / openrouter") { assertEndpointContract(ClaudeApi(ClaudeConfig(OPENROUTER_KEY, "anthropic/claude-sonnet-4.6", "https://openrouter.ai/api")), "claude / openrouter") } } }
