@@ -16,7 +16,7 @@ internal class TurnDraft(private val output: OutputContract, private val observe
         observer?.onEvent(TurnEvent.ItemDelta(item.id, TurnItemDelta.Text(text)))
     }
 
-    suspend fun appendReasoning(text: String, kind: ReasoningKind = ReasoningKind.Summary, blackboard: Blackboard = Blackboard.Empty) {
+    suspend fun appendReasoning(text: String, kind: ReasoningKind = ReasoningKind.Summary, blackboard: LlmBlackboard = LlmBlackboard.Empty) {
         if (text.isEmpty() && blackboard.isEmpty) return
 
         val item = lastReasoning(kind) ?: DraftItem.Reasoning(newItemId(), StringBuilder(), kind, blackboard).also {
@@ -42,7 +42,7 @@ internal class TurnDraft(private val output: OutputContract, private val observe
         completeItem(item)
     }
 
-    suspend fun startTool(id: String, name: String, blackboard: Blackboard = Blackboard.Empty) {
+    suspend fun startTool(id: String, name: String, blackboard: LlmBlackboard = LlmBlackboard.Empty) {
         if (items.any { it is DraftItem.ToolCall && it.callId == id }) return
 
         val item = DraftItem.ToolCall(newItemId(), id, name, StringBuilder(), blackboard)
@@ -67,7 +67,7 @@ internal class TurnDraft(private val output: OutputContract, private val observe
         completeItem(item)
     }
 
-    suspend fun complete(usage: TokenUsage? = null, trace: TurnTrace = TurnTrace(), blackboard: Blackboard = Blackboard.Empty): TurnResult {
+    suspend fun complete(usage: TokenUsage? = null, trace: TurnTrace = TurnTrace(), blackboard: LlmBlackboard = LlmBlackboard.Empty): TurnResult {
         val result = TurnResult(items.map { it.freeze(output) }, usage, trace, blackboard)
 
         items.forEach { completeItem(it) }
@@ -81,7 +81,7 @@ internal class TurnDraft(private val output: OutputContract, private val observe
         return result
     }
 
-    fun partial(usage: TokenUsage? = null, trace: TurnTrace = TurnTrace(), blackboard: Blackboard = Blackboard.Empty) = TurnResult(items.map { it.freeze(output) }, usage, trace, blackboard)
+    fun partial(usage: TokenUsage? = null, trace: TurnTrace = TurnTrace(), blackboard: LlmBlackboard = LlmBlackboard.Empty) = TurnResult(items.map { it.freeze(output) }, usage, trace, blackboard)
     fun isEmpty() = items.isEmpty()
 
     private fun lastContent() = items.lastOrNull() as? DraftItem.Content
@@ -100,11 +100,11 @@ private sealed interface DraftItem {
         override fun freeze(output: OutputContract) = TurnItem.Content(text.toString().toOutputBody(output))
     }
 
-    data class Reasoning(override val id: String, val text: StringBuilder, val kind: ReasoningKind, var blackboard: Blackboard = Blackboard.Empty) : DraftItem {
+    data class Reasoning(override val id: String, val text: StringBuilder, val kind: ReasoningKind, var blackboard: LlmBlackboard = LlmBlackboard.Empty) : DraftItem {
         override fun freeze(output: OutputContract) = TurnItem.Reasoning(text.toString().ifBlank { null }, kind, blackboard)
     }
 
-    data class ToolCall(override val id: String, val callId: String, val name: String, val arguments: StringBuilder, val blackboard: Blackboard = Blackboard.Empty) : DraftItem {
+    data class ToolCall(override val id: String, val callId: String, val name: String, val arguments: StringBuilder, val blackboard: LlmBlackboard = LlmBlackboard.Empty) : DraftItem {
         override fun freeze(output: OutputContract) = TurnItem.ToolCall(callId, name, arguments.toString().toJsonObjectLenient(), blackboard)
     }
 

@@ -2,16 +2,17 @@ package me.earzuchan.chatdrama.framework.llm
 
 import kotlinx.serialization.json.*
 
-internal fun ToolDefinition.inputSchema() = toolObjectSchema(args)
+internal fun ToolDefinition.inputSchema(strict: Boolean = false) = toolObjectSchema(args, strict)
 
-private fun toolObjectSchema(args: List<ToolArg>) = buildJsonObject {
+private fun toolObjectSchema(args: List<ToolArg>, strict: Boolean) = buildJsonObject {
     put("type", "object")
-    put("properties", buildJsonObject { args.forEach { put(it.name, it.schema()) } })
-    args.filter { it.required }.map { it.name }.takeIf { it.isNotEmpty() }?.let { required -> put("required", buildJsonArray { required.forEach { add(it) } }) }
+    put("properties", buildJsonObject { args.forEach { put(it.name, it.schema(strict)) } })
+    args.filter { strict || it.required }.map { it.name }.takeIf { it.isNotEmpty() }?.let { required -> put("required", buildJsonArray { required.forEach { add(it) } }) }
+    if (strict) put("additionalProperties", false)
 }
 
-private fun ToolArg.schema(): JsonObject {
-    val schema = type.schema()
+private fun ToolArg.schema(strict: Boolean): JsonObject {
+    val schema = type.schema(strict)
     if (description == null) return schema
     return buildJsonObject {
         schema.forEach { (key, value) -> put(key, value) }
@@ -19,7 +20,7 @@ private fun ToolArg.schema(): JsonObject {
     }
 }
 
-private fun ToolArgType.schema(): JsonObject = when (this) {
+private fun ToolArgType.schema(strict: Boolean): JsonObject = when (this) {
     ToolArgType.StringType -> buildJsonObject { put("type", "string") }
     ToolArgType.IntegerType -> buildJsonObject { put("type", "integer") }
     ToolArgType.NumberType -> buildJsonObject { put("type", "number") }
@@ -31,8 +32,8 @@ private fun ToolArgType.schema(): JsonObject = when (this) {
 
     is ToolArgType.ArrayType -> buildJsonObject {
         put("type", "array")
-        put("items", item.schema())
+        put("items", item.schema(strict))
     }
 
-    is ToolArgType.ObjectType -> toolObjectSchema(args)
+    is ToolArgType.ObjectType -> toolObjectSchema(args, strict)
 }

@@ -18,11 +18,11 @@ fun imageBase64ContentParts(base64: String, mimeType: String): List<ContentPart>
 
 // 这几个初有恩情
 
-fun textContent(text: String, label: String? = null, metadata: Map<String, String> = emptyMap()) = TurnInputItem.Content(textContentParts(text), label, metadata)
+fun textContentInputItem(text: String, label: String? = null, metadata: Map<String, String> = emptyMap()) = TurnInputItem.Content(textContentParts(text), label, metadata)
 
-fun imageUrlContent(url: String, mimeType: String? = null, label: String? = null, metadata: Map<String, String> = emptyMap()) = TurnInputItem.Content(imageUrlContentParts(url, mimeType), label, metadata)
+fun imageUrlContentInputItem(url: String, mimeType: String? = null, label: String? = null, metadata: Map<String, String> = emptyMap()) = TurnInputItem.Content(imageUrlContentParts(url, mimeType), label, metadata)
 
-fun imageBase64Content(base64: String, mimeType: String, label: String? = null, metadata: Map<String, String> = emptyMap()) = TurnInputItem.Content(imageBase64ContentParts(base64, mimeType), label, metadata)
+fun imageBase64ContentInputItem(base64: String, mimeType: String, label: String? = null, metadata: Map<String, String> = emptyMap()) = TurnInputItem.Content(imageBase64ContentParts(base64, mimeType), label, metadata)
 
 fun content(parts: List<ContentPart>, label: String? = null, metadata: Map<String, String> = emptyMap()) = TurnInputItem.Content(parts, label, metadata)
 

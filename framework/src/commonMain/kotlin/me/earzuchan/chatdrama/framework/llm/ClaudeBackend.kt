@@ -2,21 +2,32 @@ package me.earzuchan.chatdrama.framework.llm
 
 import kotlinx.serialization.json.*
 
-private const val CLAUDE_PROTOCOL_MAX_OUTPUT_TOKENS = 128000 // CLAUDE 必填这一块，128k有感觉吗
+private const val CLAUDE_PROTOCOL_MAX_OUTPUT_TOKENS = 8192 // 128000 // CLAUDE 必填这一块，128k有感觉吗
 
-data class ClaudeBackendConfig(val apiKey: String, val defaultModel: String, val baseUrl: String = "https://api.anthropic.com", val anthropicVersion: String = "2023-06-01", val extraHeaders: Map<String, String> = emptyMap())
+data class ClaudeBackendConfig(val apiKey: String, val baseUrl: String = "https://api.anthropic.com", val anthropicVersion: String = "2023-06-01", val extraHeaders: Map<String, String> = emptyMap())
+
+private data class ClaudeRoot(val system: JsonArray? = null, val tools: JsonArray? = null)
+
+private data class ClaudeLaneB(override val rootRevisionId: LlmNodeId, override val anchorNodeId: LlmNodeId?, override val configKey: ProviderLaneBConfigKey, val root: ClaudeRoot, val messages: List<JsonObject>, override val blackboard: LlmBlackboard = LlmBlackboard.Empty) : ProviderLaneB {
+    override val shape = ProviderShape.Claude
+}
 
 class ClaudeBackend(private val config: ClaudeBackendConfig) : HttpProviderBackend() {
     override val shape = ProviderShape.Claude
-    override val defaultConfig = LlmCallConfig(model = config.defaultModel, cache = CachePreference.Prefer, remoteState = RemoteStatePreference.Off)
     override val capabilities = LlmCapabilities(setOf(LlmFeature.Content, LlmFeature.Streaming, LlmFeature.ImageInput, LlmFeature.ToolCalling, LlmFeature.Reasoning), setOf(LlmFeature.JsonOutput, LlmFeature.PromptCaching))
 
-    override suspend fun request(turn: ProviderTurn, mode: RequestMode) = when (mode) {
-        RequestMode.Static -> parseClaudeResponse(postJson(messagesUrl(), headers(), claudeBody(turn, stream = false)), turn)
-        is RequestMode.Streamed -> stream(turn, mode.observer)
+    override fun rebuildLaneB(rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB = ClaudeLaneB(rootRevision.id, nodes.lastOrNull()?.id, config.laneBKey(shape), claudeRoot(rootRevision.root, config.output), claudeMessages(nodes), sessionBlackboard.onlyPrefixed("claude."))
+
+    override fun debugLaneB(laneB: ProviderLaneB?) = laneB?.let { debugLaneB(it as? ClaudeLaneB ?: return@let providerLaneBDebug("ClaudeLaneB(wrong type)", it)) } ?: "ClaudeLaneB(null)"
+
+    override suspend fun request(turn: ProviderTurn<ProviderLaneB>, mode: RequestMode): ProviderTurnCommit<ProviderLaneB> = requestTyped(turn.typedTurn("Claude") { it as? ClaudeLaneB }, mode)
+
+    private suspend fun requestTyped(turn: ProviderTurn<ClaudeLaneB>, mode: RequestMode) = when (mode) {
+        RequestMode.Static -> commit(turn, parseClaudeResponse(postJson(messagesUrl(), headers(), claudeBody(turn, stream = false)), turn))
+        is RequestMode.Streamed -> commit(turn, stream(turn, mode.observer))
     }
 
-    private suspend fun stream(turn: ProviderTurn, observer: TurnObserver?): TurnResult {
+    private suspend fun stream(turn: ProviderTurn<ClaudeLaneB>, observer: TurnObserver?): TurnResult {
         val draft = TurnDraft(turn.config.output, observer)
         val tools = mutableMapOf<Int, Pair<String, String>>()
         var usage: TokenUsage? = null
@@ -40,7 +51,7 @@ class ClaudeBackend(private val config: ClaudeBackendConfig) : HttpProviderBacke
                             }
 
                             "thinking" -> block.string("thinking")?.let { draft.appendReasoning(it) }
-                            "redacted_thinking" -> draft.appendReasoning(null.orEmpty(), ReasoningKind.Redacted, block.string("data")?.let { Blackboard.Empty.with("claude.messages.redacted_thinking", it) } ?: Blackboard.Empty)
+                            "redacted_thinking" -> draft.appendReasoning(null.orEmpty(), ReasoningKind.Redacted, block.string("data")?.let { LlmBlackboard.Empty.with("claude.messages.redacted_thinking", it) } ?: LlmBlackboard.Empty)
                         }
                     }
 
@@ -50,7 +61,7 @@ class ClaudeBackend(private val config: ClaudeBackendConfig) : HttpProviderBacke
                         when (delta.string("type")) {
                             "text_delta" -> draft.appendContent(delta.string("text").orEmpty())
                             "thinking_delta" -> draft.appendReasoning(delta.string("thinking").orEmpty())
-                            "signature_delta" -> draft.appendReasoning("", ReasoningKind.Opaque, delta.string("signature")?.let { Blackboard.Empty.with("claude.messages.thinking_signature", it) } ?: Blackboard.Empty)
+                            "signature_delta" -> draft.appendReasoning("", blackboard = delta.string("signature")?.let { LlmBlackboard.Empty.with("claude.messages.thinking_signature", it) } ?: LlmBlackboard.Empty)
                             "input_json_delta" -> {
                                 val (id, name) = tools[index] ?: ("tool_$index" to "function")
                                 draft.appendToolArguments(id, name, delta.string("partial_json").orEmpty())
@@ -65,7 +76,7 @@ class ClaudeBackend(private val config: ClaudeBackendConfig) : HttpProviderBacke
                 }
             }
             tools.values.forEach { (id, _) -> draft.completeTool(id) }
-            val blackboard = messageId?.let { Blackboard.Empty.with("claude.messages.message_id", it) } ?: Blackboard.Empty
+            val blackboard = messageId?.let { LlmBlackboard.Empty.with("claude.messages.message_id", it) } ?: LlmBlackboard.Empty
             return draft.complete(usage, TurnTrace(shape, turn.config.model, finishReason, blackboard = blackboard), blackboard)
         } catch (throwable: Throwable) {
             throw LlmTurnException(throwable.message ?: "Claude stream failed", throwable, draft.partial(usage, TurnTrace(shape, turn.config.model, finishReason)))
@@ -81,75 +92,109 @@ class ClaudeBackend(private val config: ClaudeBackendConfig) : HttpProviderBacke
         putAll(config.extraHeaders)
     }
 
-    private fun claudeBody(turn: ProviderTurn, stream: Boolean): JsonObject {
+    private fun debugLaneB(lane: ClaudeLaneB) = buildString {
+        appendLine(providerLaneBDebug("ClaudeLaneB", lane))
+        appendLine("  root.system=${lane.root.system}")
+        appendLine("  root.tools=${lane.root.tools}")
+        appendLine("  messages:")
+        lane.messages.forEachIndexed { index, message -> appendLine("    [$index] $message") }
+    }
+
+    private fun claudeBody(turn: ProviderTurn<ClaudeLaneB>, stream: Boolean): JsonObject {
+        val lane = turn.laneB
         val thinking = claudeThinking(turn.config.reasoning)
         val body = buildJsonObject {
             put("model", turn.config.model)
             put("max_tokens", CLAUDE_PROTOCOL_MAX_OUTPUT_TOKENS)
-            put("messages", claudeMessages(turn))
-            if (turn.rootRevision.root.instructions.isNotEmpty()) put("system", claudeSystem(turn.rootRevision.root.instructions))
+            put("messages", claudeMessages(lane, turn.requestNode.request))
+            lane.root.system?.let { put("system", it) }
             turn.config.temperature?.let { put("temperature", it) }
             if (stream) put("stream", true)
-            if (turn.rootRevision.root.tools.isNotEmpty()) put("tools", buildJsonArray { turn.rootRevision.root.tools.forEach { add(claudeTool(it)) } })
+            lane.root.tools?.takeIf { it.isNotEmpty() }?.let { put("tools", it) }
             thinking?.let { put("thinking", it) }
-            if (turn.config.output !is OutputContract.Text) put("system", claudeSystem(turn.rootRevision.root.instructions + ContentPart.Text(turn.config.output.jsonInstruction())))
         }
         return body.merge(turn.config.providerOptions[shape] ?: emptyJsonObject())
     }
 
-    private fun claudeMessages(turn: ProviderTurn) = buildJsonArray {
-        turn.nodes.forEach { node ->
-            when (node) {
-                is TurnRequestNode -> node.request.items.forEach { item ->
-                    when (item) {
-                        is TurnInputItem.Content -> add(buildJsonObject {
-                            put("role", "user")
-                            put("content", claudeContent(item.parts))
-                        })
+    private fun commit(turn: ProviderTurn<ClaudeLaneB>, result: TurnResult): ProviderTurnCommit<ClaudeLaneB> {
+        val lane = turn.laneB
+        val next = lane.copy(anchorNodeId = turn.resultNodeId, messages = lane.messages + claudeRequestMessages(turn.requestNode.request) + claudeAssistantMessage(result), blackboard = lane.blackboard.withAll(result.blackboard.onlyPrefixed("claude."))).tidyAfterAppend()
+        return ProviderTurnCommit(next, result)
+    }
+}
 
-                        is TurnInputItem.ToolResult -> add(buildJsonObject {
-                            put("role", "user")
-                            put("content", buildJsonArray {
-                                add(buildJsonObject {
-                                    put("type", "tool_result")
-                                    put("tool_use_id", item.toolCallId)
-                                    put("content", item.parts.plainText())
-                                    if (item.isError) put("is_error", true)
-                                })
-                            })
-                        })
-                    }
-                }
+private fun claudeRoot(root: SessionRoot, output: OutputContract): ClaudeRoot {
+    val instructions = if (output is OutputContract.Text) root.instructions else root.instructions + ContentPart.Text(output.jsonInstruction())
+    return ClaudeRoot(instructions.takeIf { it.isNotEmpty() }?.let(::claudeSystem), root.tools.takeIf { it.isNotEmpty() }?.let { buildJsonArray { it.forEach { tool -> add(claudeTool(tool)) } } })
+}
 
-                is TurnResultNode -> add(buildJsonObject {
-                    put("role", "assistant")
-                    put("content", buildJsonArray {
-                        node.result.items.forEach { item ->
-                            when (item) {
-                                is TurnItem.Content -> add(buildJsonObject {
-                                    put("type", "text")
-                                    put("text", item.asText())
-                                })
+private fun claudeMessages(lane: ClaudeLaneB, request: TurnRequest) = buildJsonArray {
+    lane.messages.forEach { add(it) }
+    claudeRequestMessages(request).forEach { add(it) }
+}
 
-                                is TurnItem.Reasoning -> add(item.toClaudeThinkingBlock())
-                                is TurnItem.ToolCall -> add(buildJsonObject {
-                                    put("type", "tool_use")
-                                    put("id", item.id)
-                                    put("name", item.name)
-                                    put("input", item.arguments)
-                                })
-
-                                is TurnItem.Refusal -> item.text?.let { add(buildJsonObject {
-                                    put("type", "text")
-                                    put("text", it)
-                                }) }
-                            }
-                        }
-                    })
-                })
-            }
+private fun claudeMessages(nodes: List<SessionNode>) = buildList {
+    nodes.forEach { node ->
+        when (node) {
+            is TurnRequestNode -> addAll(claudeRequestMessages(node.request))
+            is TurnResultNode -> add(claudeAssistantMessage(node.result))
         }
     }
+}
+
+private fun claudeRequestMessages(request: TurnRequest) = buildList {
+    request.items.forEach { item ->
+        when (item) {
+            is TurnInputItem.Content -> add(buildJsonObject {
+                put("role", "user")
+                put("content", claudeContent(item.parts))
+            })
+
+            is TurnInputItem.ToolResult -> add(buildJsonObject {
+                put("role", "user")
+                put("content", buildJsonArray {
+                    add(buildJsonObject {
+                        put("type", "tool_result")
+                        put("tool_use_id", item.toolCallId)
+                        put("content", item.parts.plainText())
+                        if (item.isError) put("is_error", true)
+                    })
+                })
+            })
+        }
+    }
+}
+
+private fun claudeAssistantMessage(result: TurnResult) = buildJsonObject {
+    put("role", "assistant")
+    put("content", buildJsonArray {
+        result.items.forEach { item ->
+            when (item) {
+                is TurnItem.Content -> add(buildJsonObject {
+                    put("type", "text")
+                    put("text", item.asText())
+                })
+
+                is TurnItem.Reasoning -> add(item.toClaudeThinkingBlock())
+                is TurnItem.ToolCall -> add(buildJsonObject {
+                    put("type", "tool_use")
+                    put("id", item.id)
+                    put("name", item.name)
+                    put("input", item.arguments)
+                })
+
+                is TurnItem.Refusal -> item.text?.let { add(buildJsonObject {
+                    put("type", "text")
+                    put("text", it)
+                }) }
+            }
+        }
+    })
+}
+
+private fun ClaudeLaneB.tidyAfterAppend(): ClaudeLaneB {
+    // 未来可在这里插入小整理：看尾部是否闭合成一波（Prompt-Answer），薄掉一波里不必重发的思考/Tool
+    return this
 }
 
 private fun claudeSystem(parts: List<ContentPart>) = buildJsonArray { parts.forEach { add(claudeContentBlock(it)) } }
@@ -195,14 +240,14 @@ private fun claudeThinking(reasoning: ReasoningLevel): JsonObject? = when (reaso
     }
 }
 
-private suspend fun parseClaudeResponse(raw: JsonObject, turn: ProviderTurn): TurnResult {
+private suspend fun parseClaudeResponse(raw: JsonObject, turn: ProviderTurn<*>): TurnResult {
     val draft = TurnDraft(turn.config.output)
     raw["content"]?.jsonArrayOrNull().orEmpty().forEachIndexed { index, itemElement ->
         val item = itemElement.jsonObjectOrNull() ?: return@forEachIndexed
         when (item.string("type")) {
             "text" -> draft.appendContent(item.string("text").orEmpty())
-            "thinking" -> draft.appendReasoning(item.string("thinking").orEmpty(), ReasoningKind.Summary, item.string("signature")?.let { Blackboard.Empty.with("claude.messages.thinking_signature", it) } ?: Blackboard.Empty)
-            "redacted_thinking" -> draft.appendReasoning("", ReasoningKind.Redacted, item.string("data")?.let { Blackboard.Empty.with("claude.messages.redacted_thinking", it) } ?: Blackboard.Empty)
+            "thinking" -> draft.appendReasoning(item.string("thinking").orEmpty(), ReasoningKind.Summary, item.string("signature")?.let { LlmBlackboard.Empty.with("claude.messages.thinking_signature", it) } ?: LlmBlackboard.Empty)
+            "redacted_thinking" -> draft.appendReasoning("", ReasoningKind.Redacted, item.string("data")?.let { LlmBlackboard.Empty.with("claude.messages.redacted_thinking", it) } ?: LlmBlackboard.Empty)
             "tool_use" -> {
                 val id = item.string("id") ?: "tool_$index"
                 val name = item.string("name") ?: "function"
@@ -212,7 +257,7 @@ private suspend fun parseClaudeResponse(raw: JsonObject, turn: ProviderTurn): Tu
             }
         }
     }
-    val blackboard = raw.string("id")?.let { Blackboard.Empty.with("claude.messages.message_id", it) } ?: Blackboard.Empty
+    val blackboard = raw.string("id")?.let { LlmBlackboard.Empty.with("claude.messages.message_id", it) } ?: LlmBlackboard.Empty
     return draft.complete(parseClaudeUsage(raw["usage"]?.jsonObjectOrNull()), TurnTrace(ProviderShape.Claude, raw.string("model") ?: turn.config.model, raw.string("stop_reason"), raw, blackboard), blackboard)
 }
 

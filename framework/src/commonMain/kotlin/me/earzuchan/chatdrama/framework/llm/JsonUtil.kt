@@ -47,6 +47,8 @@ internal fun JsonObject.merge(other: JsonObject) = buildJsonObject {
     other.forEach { (key, value) -> put(key, value) }
 }
 
+internal fun LlmBlackboard.onlyPrefixed(vararg prefixes: String) = LlmBlackboard(values.filterKeys { key -> prefixes.any { key.startsWith(it) } })
+
 internal fun appendQuery(url: String, key: String, value: String): String {
     val separator = if (url.contains("?")) "&" else "?"
     return "$url$separator$key=$value"

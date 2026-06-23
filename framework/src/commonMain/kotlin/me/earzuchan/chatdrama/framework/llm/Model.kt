@@ -12,17 +12,17 @@ data class LlmCapabilities(val native: Set<LlmFeature>, val bestEffort: Set<LlmF
     fun emits(feature: LlmFeature) = feature in native
 }
 
-data class Blackboard(val values: Map<String, JsonElement> = emptyMap()) {
+data class LlmBlackboard(val values: Map<String, JsonElement> = emptyMap()) {
     val isEmpty get() = values.isEmpty()
     operator fun get(key: String) = values[key]
     fun string(key: String) = values[key]?.jsonPrimitiveOrNull()?.contentOrNull
     fun obj(key: String) = values[key]?.jsonObjectOrNull()
-    fun with(key: String, value: JsonElement) = Blackboard(values + (key to value))
+    fun with(key: String, value: JsonElement) = LlmBlackboard(values + (key to value))
     fun with(key: String, value: String) = with(key, JsonPrimitive(value))
-    fun withAll(other: Blackboard) = Blackboard(values + other.values)
-    fun without(key: String) = Blackboard(values - key)
+    fun withAll(other: LlmBlackboard) = LlmBlackboard(values + other.values)
+    fun without(key: String) = LlmBlackboard(values - key)
 
-    companion object { val Empty = Blackboard() }
+    companion object { val Empty = LlmBlackboard() }
 }
 
 sealed interface ContentPart {
@@ -45,14 +45,14 @@ sealed interface ToolArgType {
     data class ObjectType(val args: List<ToolArg>) : ToolArgType
 }
 
-data class SessionRoot(val instructions: List<ContentPart> = emptyList(), val tools: List<ToolDefinition> = emptyList(), val blackboard: Blackboard = Blackboard.Empty)
+data class SessionRoot(val instructions: List<ContentPart> = emptyList(), val tools: List<ToolDefinition> = emptyList(), val blackboard: LlmBlackboard = LlmBlackboard.Empty)
 
 sealed interface TurnInputItem {
     data class Content(val parts: List<ContentPart>, val label: String? = null, val metadata: Map<String, String> = emptyMap()) : TurnInputItem
     data class ToolResult(val toolCallId: String, val name: String? = null, val parts: List<ContentPart>, val isError: Boolean = false, val metadata: Map<String, String> = emptyMap()) : TurnInputItem
 }
 
-data class TurnRequest(val items: List<TurnInputItem>, val metadata: Map<String, String> = emptyMap(), val blackboard: Blackboard = Blackboard.Empty)
+data class TurnRequest(val items: List<TurnInputItem>, val metadata: Map<String, String> = emptyMap(), val blackboard: LlmBlackboard = LlmBlackboard.Empty)
 
 sealed interface OutputBody {
     data class Text(val text: String) : OutputBody
@@ -64,19 +64,19 @@ enum class ReasoningKind { Summary, Raw, Redacted, Opaque }
 data class SafetyInfo(val reason: String? = null, val categories: List<String> = emptyList(), val raw: JsonElement? = null)
 
 sealed interface TurnItem {
-    val blackboard: Blackboard
+    val blackboard: LlmBlackboard
 
-    data class Content(val body: OutputBody, override val blackboard: Blackboard = Blackboard.Empty) : TurnItem
-    data class Reasoning(val text: String? = null, val kind: ReasoningKind = ReasoningKind.Summary, override val blackboard: Blackboard = Blackboard.Empty) : TurnItem
-    data class ToolCall(val id: String, val name: String, val arguments: JsonObject, override val blackboard: Blackboard = Blackboard.Empty) : TurnItem
-    data class Refusal(val text: String? = null, val safety: SafetyInfo? = null, override val blackboard: Blackboard = Blackboard.Empty) : TurnItem
+    data class Content(val body: OutputBody, override val blackboard: LlmBlackboard = LlmBlackboard.Empty) : TurnItem
+    data class Reasoning(val text: String? = null, val kind: ReasoningKind = ReasoningKind.Summary, override val blackboard: LlmBlackboard = LlmBlackboard.Empty) : TurnItem
+    data class ToolCall(val id: String, val name: String, val arguments: JsonObject, override val blackboard: LlmBlackboard = LlmBlackboard.Empty) : TurnItem
+    data class Refusal(val text: String? = null, val safety: SafetyInfo? = null, override val blackboard: LlmBlackboard = LlmBlackboard.Empty) : TurnItem
 }
 
 data class TokenUsage(val inputTokens: Int? = null, val outputTokens: Int? = null, val totalTokens: Int? = null, val cachedInputTokens: Int? = null, val reasoningTokens: Int? = null)
 
-data class TurnTrace(val shape: ProviderShape? = null, val model: String? = null, val finishReason: String? = null, val raw: JsonElement? = null, val blackboard: Blackboard = Blackboard.Empty, val notices: List<String> = emptyList())
+data class TurnTrace(val shape: ProviderShape? = null, val model: String? = null, val finishReason: String? = null, val raw: JsonElement? = null, val blackboard: LlmBlackboard = LlmBlackboard.Empty, val notices: List<String> = emptyList())
 
-data class TurnResult(val items: List<TurnItem>, val usage: TokenUsage? = null, val trace: TurnTrace = TurnTrace(), val blackboard: Blackboard = Blackboard.Empty)
+data class TurnResult(val items: List<TurnItem>, val usage: TokenUsage? = null, val trace: TurnTrace = TurnTrace(), val blackboard: LlmBlackboard = LlmBlackboard.Empty)
 
 enum class ReasoningLevel { Off, Minimal, Low, Medium, High, Max }
 
@@ -90,6 +90,7 @@ sealed interface OutputContract {
     data class JsonSchema(val name: String, val schema: JsonObject, val strict: Boolean = true) : OutputContract
 }
 
+// 随时可改的会话配置，模型、思考程度、缓存
 data class LlmCallConfig(val model: String? = null, val reasoning: ReasoningLevel? = null, val cache: CachePreference? = null, val remoteState: RemoteStatePreference? = null, val output: OutputContract? = null, val temperature: Double? = null, val providerOptions: Map<ProviderShape, JsonObject> = emptyMap()) {
     fun over(other: LlmCallConfig) = LlmCallConfig(other.model ?: model, other.reasoning ?: reasoning, other.cache ?: cache, other.remoteState ?: remoteState, other.output ?: output, other.temperature ?: temperature, providerOptions + other.providerOptions)
 }

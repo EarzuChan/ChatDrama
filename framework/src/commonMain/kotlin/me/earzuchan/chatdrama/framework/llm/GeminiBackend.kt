@@ -2,19 +2,30 @@ package me.earzuchan.chatdrama.framework.llm
 
 import kotlinx.serialization.json.*
 
-data class GeminiBackendConfig(val apiKey: String, val defaultModel: String, val baseUrl: String = "https://generativelanguage.googleapis.com", val apiVersion: String = "v1beta", val extraHeaders: Map<String, String> = emptyMap())
+data class GeminiBackendConfig(val apiKey: String, val baseUrl: String = "https://generativelanguage.googleapis.com", val apiVersion: String = "v1beta", val extraHeaders: Map<String, String> = emptyMap())
+
+private data class GeminiRoot(val systemInstruction: JsonObject? = null, val tools: JsonArray? = null, val toolConfig: JsonObject? = null)
+
+private data class GeminiLaneB(override val rootRevisionId: LlmNodeId, override val anchorNodeId: LlmNodeId?, override val configKey: ProviderLaneBConfigKey, val root: GeminiRoot, val contents: List<JsonObject>, override val blackboard: LlmBlackboard = LlmBlackboard.Empty) : ProviderLaneB {
+    override val shape = ProviderShape.Gemini
+}
 
 class GeminiBackend(private val config: GeminiBackendConfig) : HttpProviderBackend() {
     override val shape = ProviderShape.Gemini
-    override val defaultConfig = LlmCallConfig(model = config.defaultModel, cache = CachePreference.Prefer, remoteState = RemoteStatePreference.Off)
     override val capabilities = LlmCapabilities(setOf(LlmFeature.Content, LlmFeature.Streaming, LlmFeature.ImageInput, LlmFeature.ToolCalling, LlmFeature.JsonOutput, LlmFeature.Reasoning), setOf(LlmFeature.PromptCaching, LlmFeature.RemoteState))
 
-    override suspend fun request(turn: ProviderTurn, mode: RequestMode) = when (mode) {
-        RequestMode.Static -> parseGeminiResponse(postGeminiJson(geminiUrl(turn.config.model, stream = false), headers(), geminiBody(turn)), turn)
-        is RequestMode.Streamed -> stream(turn, mode.observer)
+    override fun rebuildLaneB(rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB = GeminiLaneB(rootRevision.id, nodes.lastOrNull()?.id, config.laneBKey(shape), geminiRoot(rootRevision.root), geminiContents(nodes), sessionBlackboard.onlyPrefixed("gemini."))
+
+    override fun debugLaneB(laneB: ProviderLaneB?) = laneB?.let { debugLaneB(it as? GeminiLaneB ?: return@let providerLaneBDebug("GeminiLaneB(wrong type)", it)) } ?: "GeminiLaneB(null)"
+
+    override suspend fun request(turn: ProviderTurn<ProviderLaneB>, mode: RequestMode): ProviderTurnCommit<ProviderLaneB> = requestTyped(turn.typedTurn("Gemini") { it as? GeminiLaneB }, mode)
+
+    private suspend fun requestTyped(turn: ProviderTurn<GeminiLaneB>, mode: RequestMode) = when (mode) {
+        RequestMode.Static -> commit(turn, parseGeminiResponse(postGeminiJson(geminiUrl(turn.config.model, stream = false), headers(), geminiBody(turn)), turn))
+        is RequestMode.Streamed -> commit(turn, stream(turn, mode.observer))
     }
 
-    private suspend fun stream(turn: ProviderTurn, observer: TurnObserver?): TurnResult {
+    private suspend fun stream(turn: ProviderTurn<GeminiLaneB>, observer: TurnObserver?): TurnResult {
         val draft = TurnDraft(turn.config.output, observer)
         var usage: TokenUsage? = null
         var finishReason: String? = null
@@ -40,7 +51,7 @@ class GeminiBackend(private val config: GeminiBackendConfig) : HttpProviderBacke
                     }
                 }
             }
-            val blackboard = responseId?.let { Blackboard.Empty.with("gemini.response_id", it) } ?: Blackboard.Empty
+            val blackboard = responseId?.let { LlmBlackboard.Empty.with("gemini.response_id", it) } ?: LlmBlackboard.Empty
             return draft.complete(usage, TurnTrace(shape, turn.config.model, finishReason, blackboard = blackboard), blackboard)
         } catch (throwable: Throwable) {
             throw LlmTurnException(throwable.message ?: "Gemini stream failed", throwable, draft.partial(usage, TurnTrace(shape, turn.config.model, finishReason)))
@@ -58,75 +69,110 @@ class GeminiBackend(private val config: GeminiBackendConfig) : HttpProviderBacke
         putAll(config.extraHeaders)
     }
 
+    private fun debugLaneB(lane: GeminiLaneB) = buildString {
+        appendLine(providerLaneBDebug("GeminiLaneB", lane))
+        appendLine("  root.systemInstruction=${lane.root.systemInstruction}")
+        appendLine("  root.tools=${lane.root.tools}")
+        appendLine("  root.toolConfig=${lane.root.toolConfig}")
+        appendLine("  contents:")
+        lane.contents.forEachIndexed { index, content -> appendLine("    [$index] $content") }
+    }
+
     private suspend fun postGeminiJson(url: String, headers: Map<String, String>, body: JsonObject) = super.postJson(url, headers, body)
 
     private suspend fun postGeminiSse(url: String, headers: Map<String, String>, body: JsonObject, onEvent: suspend (event: String?, data: String) -> Unit) = super.postSse(url, headers, body, onEvent)
 
-    private fun geminiBody(turn: ProviderTurn): JsonObject {
+    private fun geminiBody(turn: ProviderTurn<GeminiLaneB>): JsonObject {
+        val lane = turn.laneB
         val body = buildJsonObject {
-            put("contents", geminiContents(turn))
-            if (turn.rootRevision.root.instructions.isNotEmpty()) put("systemInstruction", buildJsonObject { put("parts", geminiParts(turn.rootRevision.root.instructions)) })
+            put("contents", geminiContents(lane, turn.requestNode.request))
+            lane.root.systemInstruction?.let { put("systemInstruction", it) }
             geminiGenerationConfig(turn.config).takeIf { it.isNotEmpty() }?.let { put("generationConfig", it) }
-            if (turn.rootRevision.root.tools.isNotEmpty()) {
-                put("tools", buildJsonArray { add(buildJsonObject { put("functionDeclarations", buildJsonArray { turn.rootRevision.root.tools.forEach { add(geminiFunctionDeclaration(it)) } }) }) })
-                put("toolConfig", buildJsonObject { put("functionCallingConfig", buildJsonObject { put("mode", "AUTO") }) })
-            }
+            lane.root.tools?.takeIf { it.isNotEmpty() }?.let { put("tools", it) }
+            lane.root.toolConfig?.let { put("toolConfig", it) }
         }
         return body.merge(turn.config.providerOptions[shape] ?: emptyJsonObject())
     }
 
-    private fun geminiContents(turn: ProviderTurn) = buildJsonArray {
-        turn.nodes.forEach { node ->
-            when (node) {
-                is TurnRequestNode -> node.request.items.forEach { item ->
-                    when (item) {
-                        is TurnInputItem.Content -> add(buildJsonObject {
-                            put("role", "user")
-                            put("parts", geminiParts(item.parts))
-                        })
+    private fun commit(turn: ProviderTurn<GeminiLaneB>, result: TurnResult): ProviderTurnCommit<GeminiLaneB> {
+        val lane = turn.laneB
+        val next = lane.copy(anchorNodeId = turn.resultNodeId, contents = lane.contents + geminiRequestContents(turn.requestNode.request) + geminiModelContent(result), blackboard = lane.blackboard.withAll(result.blackboard.onlyPrefixed("gemini."))).tidyAfterAppend()
+        return ProviderTurnCommit(next, result)
+    }
+}
 
-                        is TurnInputItem.ToolResult -> add(buildJsonObject {
-                            put("role", "user")
-                            put("parts", buildJsonArray {
-                                add(buildJsonObject {
-                                    put("functionResponse", buildJsonObject {
-                                        item.name?.let { put("name", it) }
-                                        put("response", buildJsonObject {
-                                            put("toolCallId", item.toolCallId)
-                                            put("result", item.parts.plainText())
-                                            put("isError", item.isError)
-                                        })
-                                    })
-                                })
-                            })
-                        })
-                    }
-                }
+private fun geminiRoot(root: SessionRoot) = GeminiRoot(
+    systemInstruction = root.instructions.takeIf { it.isNotEmpty() }?.let { buildJsonObject { put("parts", geminiParts(it)) } },
+    tools = root.tools.takeIf { it.isNotEmpty() }?.let { buildJsonArray { add(buildJsonObject { put("functionDeclarations", buildJsonArray { it.forEach { tool -> add(geminiFunctionDeclaration(tool)) } }) }) } },
+    toolConfig = root.tools.takeIf { it.isNotEmpty() }?.let { buildJsonObject { put("functionCallingConfig", buildJsonObject { put("mode", "AUTO") }) } }
+)
 
-                is TurnResultNode -> add(buildJsonObject {
-                    put("role", "model")
-                    put("parts", buildJsonArray {
-                        node.result.items.forEach { item ->
-                            when (item) {
-                                is TurnItem.Content -> add(buildJsonObject { put("text", item.asText()) })
-                                is TurnItem.Reasoning -> add(item.toGeminiThoughtPart())
-                                is TurnItem.ToolCall -> add(buildJsonObject {
-                                    item.blackboard.string("gemini.thought_signature")?.let { put("thoughtSignature", it) }
-                                    put("functionCall", buildJsonObject {
-                                        put("name", item.name)
-                                        put("args", item.arguments)
-                                        if (!item.id.startsWith("gemini:")) put("id", item.id)
-                                    })
-                                })
+private fun geminiContents(lane: GeminiLaneB, request: TurnRequest) = buildJsonArray {
+    lane.contents.forEach { add(it) }
+    geminiRequestContents(request).forEach { add(it) }
+}
 
-                                is TurnItem.Refusal -> item.text?.let { add(buildJsonObject { put("text", it) }) }
-                            }
-                        }
-                    })
-                })
-            }
+private fun geminiContents(nodes: List<SessionNode>) = buildList {
+    nodes.forEach { node ->
+        when (node) {
+            is TurnRequestNode -> addAll(geminiRequestContents(node.request))
+            is TurnResultNode -> add(geminiModelContent(node.result))
         }
     }
+}
+
+private fun geminiRequestContents(request: TurnRequest) = buildList {
+    request.items.forEach { item ->
+        when (item) {
+            is TurnInputItem.Content -> add(buildJsonObject {
+                put("role", "user")
+                put("parts", geminiParts(item.parts))
+            })
+
+            is TurnInputItem.ToolResult -> add(buildJsonObject {
+                put("role", "user")
+                put("parts", buildJsonArray {
+                    add(buildJsonObject {
+                        put("functionResponse", buildJsonObject {
+                            item.name?.let { put("name", it) }
+                            put("response", buildJsonObject {
+                                put("toolCallId", item.toolCallId)
+                                put("result", item.parts.plainText())
+                                put("isError", item.isError)
+                            })
+                        })
+                    })
+                })
+            })
+        }
+    }
+}
+
+private fun geminiModelContent(result: TurnResult) = buildJsonObject {
+    put("role", "model")
+    put("parts", buildJsonArray {
+        result.items.forEach { item ->
+            when (item) {
+                is TurnItem.Content -> add(buildJsonObject { put("text", item.asText()) })
+                is TurnItem.Reasoning -> add(item.toGeminiThoughtPart())
+                is TurnItem.ToolCall -> add(buildJsonObject {
+                    item.blackboard.string("gemini.thought_signature")?.let { put("thoughtSignature", it) }
+                    put("functionCall", buildJsonObject {
+                        put("name", item.name)
+                        put("args", item.arguments)
+                        if (!item.id.startsWith("gemini:")) put("id", item.id)
+                    })
+                })
+
+                is TurnItem.Refusal -> item.text?.let { add(buildJsonObject { put("text", it) }) }
+            }
+        }
+    })
+}
+
+private fun GeminiLaneB.tidyAfterAppend(): GeminiLaneB {
+    // 未来可在这里插入小整理：看尾部是否闭合成一波（Prompt-Answer），薄掉一波里不必重发的思考/Tool
+    return this
 }
 
 private fun geminiParts(parts: List<ContentPart>) = buildJsonArray {
@@ -188,7 +234,7 @@ private fun geminiThinkingConfig(reasoning: ReasoningLevel): JsonObject? = when 
     }
 }
 
-private suspend fun parseGeminiResponse(raw: JsonObject, turn: ProviderTurn): TurnResult {
+private suspend fun parseGeminiResponse(raw: JsonObject, turn: ProviderTurn<*>): TurnResult {
     val draft = TurnDraft(turn.config.output)
     val candidate = raw["candidates"]?.jsonArrayOrNull()?.firstOrNull()?.jsonObjectOrNull()
     candidate?.get("content")?.jsonObjectOrNull()?.get("parts")?.jsonArrayOrNull().orEmpty().forEachIndexed { index, partElement ->
@@ -202,7 +248,7 @@ private suspend fun parseGeminiResponse(raw: JsonObject, turn: ProviderTurn): Tu
             draft.completeTool(id)
         }
     }
-    val blackboard = raw.string("responseId")?.let { Blackboard.Empty.with("gemini.response_id", it) } ?: Blackboard.Empty
+    val blackboard = raw.string("responseId")?.let { LlmBlackboard.Empty.with("gemini.response_id", it) } ?: LlmBlackboard.Empty
     return draft.complete(parseGeminiUsage(raw["usageMetadata"]?.jsonObjectOrNull()), TurnTrace(ProviderShape.Gemini, turn.config.model, candidate?.string("finishReason"), raw, blackboard), blackboard)
 }
 
@@ -213,10 +259,10 @@ private fun parseGeminiUsage(usage: JsonObject?): TokenUsage? {
 
 private suspend fun JsonObject.appendGeminiTextPartTo(draft: TurnDraft) {
     string("text")?.let { if (boolean("thought") == true) draft.appendReasoning(it, blackboard = geminiThoughtBlackboard()) else draft.appendContent(it) }
-    string("thoughtSignature")?.let { draft.appendReasoning("", ReasoningKind.Opaque, Blackboard.Empty.with("gemini.thought_signature", it)) }
+    string("thoughtSignature")?.let { draft.appendReasoning("", ReasoningKind.Opaque, LlmBlackboard.Empty.with("gemini.thought_signature", it)) }
 }
 
-private fun JsonObject.geminiThoughtBlackboard() = string("thoughtSignature")?.let { Blackboard.Empty.with("gemini.thought_signature", it) } ?: Blackboard.Empty
+private fun JsonObject.geminiThoughtBlackboard() = string("thoughtSignature")?.let { LlmBlackboard.Empty.with("gemini.thought_signature", it) } ?: LlmBlackboard.Empty
 
 private fun TurnItem.Reasoning.toGeminiThoughtPart() = buildJsonObject {
     put("thought", true)

@@ -3,9 +3,21 @@ package me.earzuchan.chatdrama.framework.llm
 import io.ktor.http.*
 import kotlinx.serialization.json.*
 
-data class OpenAiLegacyBackendConfig(val apiKey: String, val defaultModel: String, val baseUrl: String = "https://api.openai.com/v1", val organization: String? = null, val project: String? = null, val includeStreamUsage: Boolean = true, val sendReasoningEffort: Boolean = true, val extraHeaders: Map<String, String> = emptyMap())
+data class OpenAiLegacyBackendConfig(val apiKey: String, val baseUrl: String = "https://api.openai.com/v1", val organization: String? = null, val project: String? = null, val includeStreamUsage: Boolean = true, val sendReasoningEffort: Boolean = true, val extraHeaders: Map<String, String> = emptyMap()) // CHECK：SendReasoningEffort，你干嘛？！
 
-data class OpenAiResponsesBackendConfig(val apiKey: String, val defaultModel: String, val baseUrl: String = "https://api.openai.com/v1", val organization: String? = null, val project: String? = null, val extraHeaders: Map<String, String> = emptyMap())
+data class OpenAiResponsesBackendConfig(val apiKey: String, val baseUrl: String = "https://api.openai.com/v1", val organization: String? = null, val project: String? = null, val extraHeaders: Map<String, String> = emptyMap())
+
+private data class OpenAiChatRoot(val systemMessage: JsonObject? = null, val tools: JsonArray? = null)
+
+private data class OpenAiLegacyLaneB(override val rootRevisionId: LlmNodeId, override val anchorNodeId: LlmNodeId?, override val configKey: ProviderLaneBConfigKey, val root: OpenAiChatRoot, val messages: List<JsonObject>, override val blackboard: LlmBlackboard = LlmBlackboard.Empty) : ProviderLaneB {
+    override val shape = ProviderShape.OpenAiLegacy
+}
+
+private data class OpenAiResponsesRoot(val instructions: String? = null, val tools: JsonArray? = null)
+
+private data class OpenAiResponsesLaneB(override val rootRevisionId: LlmNodeId, override val anchorNodeId: LlmNodeId?, override val configKey: ProviderLaneBConfigKey, val root: OpenAiResponsesRoot, val input: List<JsonObject>, val previousResponseId: String? = null, override val blackboard: LlmBlackboard = LlmBlackboard.Empty) : ProviderLaneB {
+    override val shape = ProviderShape.OpenAiResponses
+}
 
 private fun openAiHeaders(apiKey: String, organization: String?, project: String?, extraHeaders: Map<String, String>) = buildMap {
     put(HttpHeaders.Authorization, "Bearer $apiKey")
@@ -16,15 +28,20 @@ private fun openAiHeaders(apiKey: String, organization: String?, project: String
 
 class OpenAiLegacyBackend(private val config: OpenAiLegacyBackendConfig) : HttpProviderBackend() {
     override val shape = ProviderShape.OpenAiLegacy
-    override val defaultConfig = LlmCallConfig(model = config.defaultModel, cache = CachePreference.Prefer, remoteState = RemoteStatePreference.Off)
     override val capabilities = LlmCapabilities(setOf(LlmFeature.Content, LlmFeature.Streaming, LlmFeature.ImageInput, LlmFeature.ToolCalling, LlmFeature.JsonOutput), setOf(LlmFeature.PromptCaching, LlmFeature.Reasoning))
 
-    override suspend fun request(turn: ProviderTurn, mode: RequestMode) = when (mode) {
-        RequestMode.Static -> parseOpenAiChatResponse(postJson(chatCompletionsUrl(), headers(), chatCompletionsBody(turn, stream = false)), turn)
-        is RequestMode.Streamed -> stream(turn, mode.observer)
+    override fun rebuildLaneB(rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB = OpenAiLegacyLaneB(rootRevision.id, nodes.lastOrNull()?.id, config.laneBKey(shape), openAiChatRoot(rootRevision.root), openAiChatMessages(nodes), sessionBlackboard.onlyPrefixed("openai."))
+
+    override fun debugLaneB(laneB: ProviderLaneB?) = laneB?.let { debugLaneB(it as? OpenAiLegacyLaneB ?: return@let providerLaneBDebug("OpenAiLegacyLaneB(wrong type)", it)) } ?: "OpenAiLegacyLaneB(null)"
+
+    override suspend fun request(turn: ProviderTurn<ProviderLaneB>, mode: RequestMode): ProviderTurnCommit<ProviderLaneB> = requestTyped(turn.typedTurn("OpenAI legacy") { it as? OpenAiLegacyLaneB }, mode)
+
+    private suspend fun requestTyped(turn: ProviderTurn<OpenAiLegacyLaneB>, mode: RequestMode) = when (mode) {
+        RequestMode.Static -> commit(turn, parseOpenAiChatResponse(postJson(chatCompletionsUrl(), headers(), chatCompletionsBody(turn, stream = false)), turn))
+        is RequestMode.Streamed -> commit(turn, stream(turn, mode.observer))
     }
 
-    private suspend fun stream(turn: ProviderTurn, observer: TurnObserver?): TurnResult {
+    private suspend fun stream(turn: ProviderTurn<OpenAiLegacyLaneB>, observer: TurnObserver?): TurnResult {
         val draft = TurnDraft(turn.config.output, observer)
         var usage: TokenUsage? = null
         var finishReason: String? = null
@@ -67,18 +84,27 @@ class OpenAiLegacyBackend(private val config: OpenAiLegacyBackendConfig) : HttpP
 
     private fun headers() = openAiHeaders(config.apiKey, config.organization, config.project, config.extraHeaders)
 
-    private fun chatCompletionsBody(turn: ProviderTurn, stream: Boolean): JsonObject {
+    private fun debugLaneB(lane: OpenAiLegacyLaneB) = buildString {
+        appendLine(providerLaneBDebug("OpenAiLegacyLaneB", lane))
+        appendLine("  root.systemMessage=${lane.root.systemMessage}")
+        appendLine("  root.tools=${lane.root.tools}")
+        appendLine("  messages:")
+        lane.messages.forEachIndexed { index, message -> appendLine("    [$index] $message") }
+    }
+
+    private fun chatCompletionsBody(turn: ProviderTurn<OpenAiLegacyLaneB>, stream: Boolean): JsonObject {
+        val lane = turn.laneB
         val body = buildJsonObject {
             put("model", turn.config.model)
-            put("messages", openAiChatMessages(turn))
+            put("messages", openAiChatMessages(lane, turn.requestNode.request))
             turn.config.temperature?.let { put("temperature", it) }
             if (stream) {
                 put("stream", true)
                 if (config.includeStreamUsage) put("stream_options", buildJsonObject { put("include_usage", true) })
             }
 
-            if (turn.rootRevision.root.tools.isNotEmpty()) {
-                put("tools", buildJsonArray { turn.rootRevision.root.tools.forEach { add(openAiChatTool(it)) } })
+            lane.root.tools?.takeIf { it.isNotEmpty() }?.let {
+                put("tools", it)
                 put("parallel_tool_calls", true)
             }
 
@@ -89,72 +115,29 @@ class OpenAiLegacyBackend(private val config: OpenAiLegacyBackendConfig) : HttpP
         return body.merge(turn.config.providerOptions[shape] ?: emptyJsonObject())
     }
 
-    private fun openAiChatMessages(turn: ProviderTurn) = buildJsonArray {
-        if (turn.rootRevision.root.instructions.isNotEmpty()) add(buildJsonObject {
-            put("role", "system")
-            put("content", turn.rootRevision.root.instructions.plainText())
-        })
-
-        turn.nodes.forEach { node ->
-            when (node) {
-                is TurnRequestNode -> node.request.items.forEach { item ->
-                    when (item) {
-                        is TurnInputItem.Content -> add(buildJsonObject {
-                            put("role", "user")
-                            put("content", openAiChatInputContent(item.parts))
-                        })
-
-                        is TurnInputItem.ToolResult -> add(buildJsonObject {
-                            put("role", "tool")
-                            put("tool_call_id", item.toolCallId)
-                            item.name?.let { put("name", it) }
-                            put("content", item.parts.plainText())
-                        })
-                    }
-                }
-
-                is TurnResultNode -> add(openAiChatAssistantMessage(node.result))
-            }
-        }
-    }
-
-    private fun openAiChatAssistantMessage(result: TurnResult) = buildJsonObject {
-        put("role", "assistant")
-        val text = result.items.mapNotNull {
-            when (it) {
-                is TurnItem.Content -> (it.body as? OutputBody.Text)?.text ?: (it.body as? OutputBody.Json)?.rawText ?: it.body.toString()
-                is TurnItem.Refusal -> it.text
-                is TurnItem.Reasoning, is TurnItem.ToolCall -> null
-            }
-        }.joinToString("\n").ifBlank { null }
-        val toolCalls = result.items.filterIsInstance<TurnItem.ToolCall>()
-        if (text != null) put("content", text) else put("content", JsonNull)
-        if (toolCalls.isNotEmpty()) put("tool_calls", buildJsonArray {
-            toolCalls.forEach { toolCall ->
-                add(buildJsonObject {
-                    put("id", toolCall.id)
-                    put("type", "function")
-                    put("function", buildJsonObject {
-                        put("name", toolCall.name)
-                        put("arguments", toolCall.arguments.toString())
-                    })
-                })
-            }
-        })
+    private fun commit(turn: ProviderTurn<OpenAiLegacyLaneB>, result: TurnResult): ProviderTurnCommit<OpenAiLegacyLaneB> {
+        val lane = turn.laneB
+        val next = lane.copy(anchorNodeId = turn.resultNodeId, messages = lane.messages + openAiChatRequestMessages(turn.requestNode.request) + openAiChatAssistantMessage(result), blackboard = lane.blackboard.withAll(result.blackboard.onlyPrefixed("openai."))).tidyAfterAppend()
+        return ProviderTurnCommit(next, result)
     }
 }
 
 class OpenAiResponsesBackend(private val config: OpenAiResponsesBackendConfig) : HttpProviderBackend() {
     override val shape = ProviderShape.OpenAiResponses
-    override val defaultConfig = LlmCallConfig(model = config.defaultModel, cache = CachePreference.Prefer, remoteState = RemoteStatePreference.Off)
     override val capabilities = LlmCapabilities(setOf(LlmFeature.Content, LlmFeature.Streaming, LlmFeature.ImageInput, LlmFeature.ToolCalling, LlmFeature.JsonOutput, LlmFeature.Reasoning), setOf(LlmFeature.PromptCaching, LlmFeature.RemoteState))
 
-    override suspend fun request(turn: ProviderTurn, mode: RequestMode) = when (mode) {
-        RequestMode.Static -> parseOpenAiResponsesResponse(postJson(responsesUrl(), headers(), responsesBody(turn, stream = false)), turn)
-        is RequestMode.Streamed -> stream(turn, mode.observer)
+    override fun rebuildLaneB(rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB = OpenAiResponsesLaneB(rootRevision.id, nodes.lastOrNull()?.id, config.laneBKey(shape), openAiResponsesRoot(rootRevision.root), openAiResponsesInput(nodes), sessionBlackboard.string("openai.responses.response_id"), sessionBlackboard.onlyPrefixed("openai."))
+
+    override fun debugLaneB(laneB: ProviderLaneB?) = laneB?.let { debugLaneB(it as? OpenAiResponsesLaneB ?: return@let providerLaneBDebug("OpenAiResponsesLaneB(wrong type)", it)) } ?: "OpenAiResponsesLaneB(null)"
+
+    override suspend fun request(turn: ProviderTurn<ProviderLaneB>, mode: RequestMode): ProviderTurnCommit<ProviderLaneB> = requestTyped(turn.typedTurn("OpenAI responses") { it as? OpenAiResponsesLaneB }, mode)
+
+    private suspend fun requestTyped(turn: ProviderTurn<OpenAiResponsesLaneB>, mode: RequestMode) = when (mode) {
+        RequestMode.Static -> commit(turn, parseOpenAiResponsesResponse(postJson(responsesUrl(), headers(), responsesBody(turn, stream = false)), turn))
+        is RequestMode.Streamed -> commit(turn, stream(turn, mode.observer))
     }
 
-    private suspend fun stream(turn: ProviderTurn, observer: TurnObserver?): TurnResult {
+    private suspend fun stream(turn: ProviderTurn<OpenAiResponsesLaneB>, observer: TurnObserver?): TurnResult {
         val draft = TurnDraft(turn.config.output, observer)
         var completedRaw: JsonObject? = null
         val tools = mutableMapOf<String, Pair<String, String>>()
@@ -203,18 +186,28 @@ class OpenAiResponsesBackend(private val config: OpenAiResponsesBackendConfig) :
 
     private fun responsesUrl() = "${config.baseUrl.trimEnd('/')}/responses"
 
-    private fun headers() = openAiHeaders(config.apiKey, config.organization, config.project, config.extraHeaders)
+    private fun headers() = openAiHeaders(config.apiKey, config.organization, config.project, config.extraHeaders) // Org和项目被OpenAI新API吃
 
-    private fun responsesBody(turn: ProviderTurn, stream: Boolean): JsonObject {
+    private fun debugLaneB(lane: OpenAiResponsesLaneB) = buildString {
+        appendLine(providerLaneBDebug("OpenAiResponsesLaneB", lane))
+        appendLine("  root.instructions=${lane.root.instructions}")
+        appendLine("  root.tools=${lane.root.tools}")
+        appendLine("  previousResponseId=${lane.previousResponseId}")
+        appendLine("  input:")
+        lane.input.forEachIndexed { index, input -> appendLine("    [$index] $input") }
+    }
+
+    private fun responsesBody(turn: ProviderTurn<OpenAiResponsesLaneB>, stream: Boolean): JsonObject {
+        val lane = turn.laneB
         val body = buildJsonObject {
             put("model", turn.config.model)
-            if (turn.rootRevision.root.instructions.isNotEmpty()) put("instructions", turn.rootRevision.root.instructions.plainText())
-            put("input", openAiResponsesInput(turn))
+            lane.root.instructions?.let { put("instructions", it) }
+            put("input", openAiResponsesInput(lane, turn.requestNode.request))
             turn.config.temperature?.let { put("temperature", it) }
             if (stream) put("stream", true)
 
-            if (turn.rootRevision.root.tools.isNotEmpty()) {
-                put("tools", buildJsonArray { turn.rootRevision.root.tools.forEach { add(openAiResponsesTool(it)) } })
+            lane.root.tools?.takeIf { it.isNotEmpty() }?.let {
+                put("tools", it)
                 put("parallel_tool_calls", true)
             }
 
@@ -224,44 +217,148 @@ class OpenAiResponsesBackend(private val config: OpenAiResponsesBackendConfig) :
         return body.merge(turn.config.providerOptions[shape] ?: emptyJsonObject())
     }
 
-    private fun openAiResponsesInput(turn: ProviderTurn) = buildJsonArray {
-        turn.nodes.forEach { node ->
-            when (node) {
-                is TurnRequestNode -> node.request.items.forEach { item ->
-                    when (item) {
-                        is TurnInputItem.Content -> add(buildJsonObject {
-                            put("role", "user")
-                            put("content", openAiResponsesInputContent(item.parts))
-                        })
+    private fun commit(turn: ProviderTurn<OpenAiResponsesLaneB>, result: TurnResult): ProviderTurnCommit<OpenAiResponsesLaneB> {
+        val lane = turn.laneB
+        val next = lane.copy(anchorNodeId = turn.resultNodeId, input = lane.input + openAiResponsesRequestInput(turn.requestNode.request) + openAiResponsesResultInput(result), previousResponseId = result.blackboard.string("openai.responses.response_id") ?: lane.previousResponseId, blackboard = lane.blackboard.withAll(result.blackboard.onlyPrefixed("openai."))).tidyAfterAppend()
+        return ProviderTurnCommit(next, result)
+    }
+}
 
-                        is TurnInputItem.ToolResult -> add(buildJsonObject {
-                            put("type", "function_call_output")
-                            put("call_id", item.toolCallId)
-                            put("output", item.parts.plainText())
-                        })
-                    }
-                }
+private fun openAiChatRoot(root: SessionRoot) = OpenAiChatRoot(
+    systemMessage = root.instructions.takeIf { it.isNotEmpty() }?.let { buildJsonObject {
+        put("role", "system")
+        put("content", it.plainText())
+    } },
+    tools = root.tools.takeIf { it.isNotEmpty() }?.let { buildJsonArray { it.forEach { tool -> add(openAiChatTool(tool)) } } }
+)
 
-                is TurnResultNode -> node.result.items.forEach { item ->
-                    when (item) {
-                        is TurnItem.Content -> add(buildJsonObject {
-                            put("role", "assistant")
-                            put("content", item.asOutputText())
-                        })
+private fun openAiResponsesRoot(root: SessionRoot) = OpenAiResponsesRoot(
+    instructions = root.instructions.takeIf { it.isNotEmpty() }?.plainText(),
+    tools = root.tools.takeIf { it.isNotEmpty() }?.let { buildJsonArray { it.forEach { tool -> add(openAiResponsesTool(tool)) } } }
+)
 
-                        is TurnItem.ToolCall -> add(buildJsonObject {
-                            put("type", "function_call")
-                            put("call_id", item.id)
-                            put("name", item.name)
-                            put("arguments", item.arguments.toString())
-                        })
+private fun openAiChatMessages(lane: OpenAiLegacyLaneB, request: TurnRequest) = buildJsonArray {
+    lane.root.systemMessage?.let { add(it) }
+    lane.messages.forEach { add(it) }
+    openAiChatRequestMessages(request).forEach { add(it) }
+}
 
-                        is TurnItem.Reasoning, is TurnItem.Refusal -> Unit
-                    }
-                }
+private fun openAiChatMessages(nodes: List<SessionNode>) = buildList {
+    nodes.forEach { node ->
+        when (node) {
+            is TurnRequestNode -> addAll(openAiChatRequestMessages(node.request))
+            is TurnResultNode -> add(openAiChatAssistantMessage(node.result))
+        }
+    }
+}
+
+private fun openAiChatRequestMessages(request: TurnRequest) = buildList {
+    request.items.forEach { item ->
+        when (item) {
+            is TurnInputItem.Content -> add(buildJsonObject {
+                put("role", "user")
+                put("content", openAiChatInputContent(item.parts))
+            })
+
+            is TurnInputItem.ToolResult -> add(buildJsonObject {
+                put("role", "tool")
+                put("tool_call_id", item.toolCallId)
+                item.name?.let { put("name", it) }
+                put("content", item.parts.plainText())
+            })
+        }
+    }
+}
+
+private fun openAiChatAssistantMessage(result: TurnResult) = buildJsonObject {
+    put("role", "assistant")
+    val text = result.items.mapNotNull {
+        when (it) {
+            is TurnItem.Content -> (it.body as? OutputBody.Text)?.text ?: (it.body as? OutputBody.Json)?.rawText ?: it.body.toString()
+            is TurnItem.Refusal -> it.text
+            is TurnItem.Reasoning, is TurnItem.ToolCall -> null
+        }
+    }.joinToString("\n").ifBlank { null }
+    val toolCalls = result.items.filterIsInstance<TurnItem.ToolCall>()
+    if (text != null) put("content", text) else put("content", JsonNull)
+    if (toolCalls.isNotEmpty()) put("tool_calls", buildJsonArray {
+        toolCalls.forEach { toolCall ->
+            add(buildJsonObject {
+                put("id", toolCall.id)
+                put("type", "function")
+                put("function", buildJsonObject {
+                    put("name", toolCall.name)
+                    put("arguments", toolCall.arguments.toString())
+                })
+            })
+        }
+    })
+}
+
+private fun openAiResponsesInput(lane: OpenAiResponsesLaneB, request: TurnRequest) = buildJsonArray {
+    lane.input.forEach { add(it) }
+    openAiResponsesRequestInput(request).forEach { add(it) }
+}
+
+private fun openAiResponsesInput(nodes: List<SessionNode>) = buildList {
+    nodes.forEach { node ->
+        when (node) {
+            is TurnRequestNode -> addAll(openAiResponsesRequestInput(node.request))
+            is TurnResultNode -> addAll(openAiResponsesResultInput(node.result))
+        }
+    }
+}
+
+private fun openAiResponsesRequestInput(request: TurnRequest) = buildList {
+    request.items.forEach { item ->
+        when (item) {
+            is TurnInputItem.Content -> add(buildJsonObject {
+                put("role", "user")
+                put("content", openAiResponsesInputContent(item.parts))
+            })
+
+            is TurnInputItem.ToolResult -> add(buildJsonObject {
+                put("type", "function_call_output")
+                put("call_id", item.toolCallId)
+                put("output", item.parts.plainText())
+            })
+        }
+    }
+}
+
+private fun openAiResponsesResultInput(result: TurnResult): List<JsonObject> {
+    val rawOutput = result.trace.raw?.jsonObjectOrNull()?.get("output")?.jsonArrayOrNull()
+    if (rawOutput != null) return rawOutput.mapNotNull { it.jsonObjectOrNull() }
+
+    return buildList {
+        result.items.forEach { item ->
+            when (item) {
+                is TurnItem.Content -> add(buildJsonObject {
+                    put("role", "assistant")
+                    put("content", item.asOutputText())
+                })
+
+                is TurnItem.ToolCall -> add(buildJsonObject {
+                    put("type", "function_call")
+                    put("call_id", item.id)
+                    put("name", item.name)
+                    put("arguments", item.arguments.toString())
+                })
+
+                is TurnItem.Reasoning, is TurnItem.Refusal -> Unit
             }
         }
     }
+}
+
+private fun OpenAiLegacyLaneB.tidyAfterAppend(): OpenAiLegacyLaneB {
+    // 未来可在这里插入小整理：看尾部是否闭合成一波（Prompt-Answer），薄掉一波里不必重发的思考/Tool
+    return this
+}
+
+private fun OpenAiResponsesLaneB.tidyAfterAppend(): OpenAiResponsesLaneB {
+    // 未来可在这里插入小整理：看尾部是否闭合成一波（Prompt-Answer），薄掉一波里不必重发的思考/Tool
+    return this
 }
 
 private fun openAiChatInputContent(parts: List<ContentPart>): JsonElement {
@@ -317,7 +414,7 @@ private fun openAiChatTool(tool: ToolDefinition) = buildJsonObject {
     put("function", buildJsonObject {
         put("name", tool.name)
         tool.description?.let { put("description", it) }
-        put("parameters", tool.inputSchema())
+        put("parameters", tool.inputSchema(tool.strict))
         put("strict", tool.strict)
     })
 }
@@ -326,7 +423,7 @@ private fun openAiResponsesTool(tool: ToolDefinition) = buildJsonObject {
     put("type", "function")
     put("name", tool.name)
     tool.description?.let { put("description", it) }
-    put("parameters", tool.inputSchema())
+    put("parameters", tool.inputSchema(tool.strict))
     put("strict", tool.strict)
 }
 
@@ -377,7 +474,7 @@ private fun JsonObject.openAiResponsesToolKey() = string("call_id") ?: string("i
 
 private fun JsonObject.openAiResponsesToolKeys(item: JsonObject) = listOfNotNull(string("call_id"), string("item_id"), item.string("call_id"), item.string("id"), int("output_index")?.toString()).distinct()
 
-private suspend fun parseOpenAiChatResponse(raw: JsonObject, turn: ProviderTurn): TurnResult {
+private suspend fun parseOpenAiChatResponse(raw: JsonObject, turn: ProviderTurn<*>): TurnResult {
     val draft = TurnDraft(turn.config.output)
     val choice = raw["choices"]?.jsonArrayOrNull()?.firstOrNull()?.jsonObjectOrNull()
     val message = choice?.get("message")?.jsonObjectOrNull()
@@ -398,7 +495,7 @@ private suspend fun parseOpenAiChatResponse(raw: JsonObject, turn: ProviderTurn)
     return draft.partial(parseOpenAiUsage(raw["usage"]?.jsonObjectOrNull()), TurnTrace(ProviderShape.OpenAiLegacy, raw.string("model") ?: turn.config.model, choice?.string("finish_reason"), raw))
 }
 
-private suspend fun parseOpenAiResponsesResponse(raw: JsonObject, turn: ProviderTurn, observer: TurnObserver? = null): TurnResult {
+private suspend fun parseOpenAiResponsesResponse(raw: JsonObject, turn: ProviderTurn<*>, observer: TurnObserver? = null): TurnResult {
     val draft = TurnDraft(turn.config.output, observer)
     raw["output"]?.jsonArrayOrNull().orEmpty().forEachIndexed { index, itemElement ->
         val item = itemElement.jsonObjectOrNull() ?: return@forEachIndexed
@@ -430,7 +527,7 @@ private suspend fun parseOpenAiResponsesResponse(raw: JsonObject, turn: Provider
     }
 
     raw.string("output_text")?.takeIf { it.isNotBlank() && draft.partial().items.none { item -> item is TurnItem.Content } }?.let { draft.appendContent(it) }
-    val blackboard = raw.string("id")?.let { Blackboard.Empty.with("openai.responses.response_id", it) } ?: Blackboard.Empty
+    val blackboard = raw.string("id")?.let { LlmBlackboard.Empty.with("openai.responses.response_id", it) } ?: LlmBlackboard.Empty
     return draft.complete(parseOpenAiResponsesUsage(raw["usage"]?.jsonObjectOrNull()), TurnTrace(ProviderShape.OpenAiResponses, raw.string("model") ?: turn.config.model, raw.string("status"), raw, blackboard), blackboard)
 }
 
