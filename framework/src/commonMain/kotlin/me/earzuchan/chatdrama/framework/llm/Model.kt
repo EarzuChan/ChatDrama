@@ -82,8 +82,6 @@ enum class ReasoningLevel { Off, Minimal, Low, Medium, High, Max }
 
 enum class CachePreference { Off, Prefer }
 
-enum class RemoteStatePreference { Off, Prefer }
-
 sealed interface OutputContract {
     data object Text : OutputContract
     data object Json : OutputContract
@@ -91,11 +89,11 @@ sealed interface OutputContract {
 }
 
 // 随时可改的会话配置，模型、思考程度、缓存
-data class LlmCallConfig(val model: String? = null, val reasoning: ReasoningLevel? = null, val cache: CachePreference? = null, val remoteState: RemoteStatePreference? = null, val output: OutputContract? = null, val temperature: Double? = null, val providerOptions: Map<ProviderShape, JsonObject> = emptyMap()) {
-    fun over(other: LlmCallConfig) = LlmCallConfig(other.model ?: model, other.reasoning ?: reasoning, other.cache ?: cache, other.remoteState ?: remoteState, other.output ?: output, other.temperature ?: temperature, providerOptions + other.providerOptions)
+data class LlmCallConfig(val model: String? = null, val reasoning: ReasoningLevel? = null, val cache: CachePreference? = null, val output: OutputContract? = null, val temperature: Double? = null, val providerOptions: Map<ProviderShape, JsonObject> = emptyMap()) {
+    fun over(other: LlmCallConfig) = LlmCallConfig(other.model ?: model, other.reasoning ?: reasoning, other.cache ?: cache, other.output ?: output, other.temperature ?: temperature, providerOptions + other.providerOptions)
 }
 
-data class EffectiveLlmCallConfig(val model: String, val reasoning: ReasoningLevel = ReasoningLevel.Off, val cache: CachePreference = CachePreference.Prefer, val remoteState: RemoteStatePreference = RemoteStatePreference.Off, val output: OutputContract = OutputContract.Text, val temperature: Double? = null, val providerOptions: Map<ProviderShape, JsonObject> = emptyMap())
+data class EffectiveLlmCallConfig(val model: String, val reasoning: ReasoningLevel = ReasoningLevel.Off, val cache: CachePreference = CachePreference.Prefer, val output: OutputContract = OutputContract.Text, val temperature: Double? = null, val providerOptions: Map<ProviderShape, JsonObject> = emptyMap())
 
 sealed interface RequestMode {
     data object Static : RequestMode

@@ -15,7 +15,12 @@ private data class OpenAiLegacyLaneB(override val rootRevisionId: LlmNodeId, ove
 
 private data class OpenAiResponsesRoot(val instructions: String? = null, val tools: JsonArray? = null)
 
-private data class OpenAiResponsesLaneB(override val rootRevisionId: LlmNodeId, override val anchorNodeId: LlmNodeId?, override val configKey: ProviderLaneBConfigKey, val root: OpenAiResponsesRoot, val input: List<JsonObject>, val previousResponseId: String? = null, override val blackboard: LlmBlackboard = LlmBlackboard.Empty) : ProviderLaneB {
+private sealed interface OpenAiResponsesContext {
+    data class Stateless(val input: List<JsonObject>, val officialCompaction: Boolean = false) : OpenAiResponsesContext
+    data class StatefulByPreviousId(val id: String, val shadowInput: List<JsonObject>) : OpenAiResponsesContext
+}
+
+private data class OpenAiResponsesLaneB(override val rootRevisionId: LlmNodeId, override val anchorNodeId: LlmNodeId?, override val configKey: ProviderLaneBConfigKey, val root: OpenAiResponsesRoot, val context: OpenAiResponsesContext, override val blackboard: LlmBlackboard = LlmBlackboard.Empty) : ProviderLaneB {
     override val shape = ProviderShape.OpenAiResponses
 }
 
@@ -26,6 +31,7 @@ private fun openAiHeaders(apiKey: String, organization: String?, project: String
     putAll(extraHeaders)
 }
 
+// TODO：小压缩
 class OpenAiLegacyBackend(private val config: OpenAiLegacyBackendConfig) : HttpProviderBackend() {
     override val shape = ProviderShape.OpenAiLegacy
     override val capabilities = LlmCapabilities(setOf(LlmFeature.Content, LlmFeature.Streaming, LlmFeature.ImageInput, LlmFeature.ToolCalling, LlmFeature.JsonOutput), setOf(LlmFeature.PromptCaching, LlmFeature.Reasoning))
@@ -34,9 +40,9 @@ class OpenAiLegacyBackend(private val config: OpenAiLegacyBackendConfig) : HttpP
 
     override fun debugLaneB(laneB: ProviderLaneB?) = laneB?.let { debugLaneB(it as? OpenAiLegacyLaneB ?: return@let providerLaneBDebug("OpenAiLegacyLaneB(wrong type)", it)) } ?: "OpenAiLegacyLaneB(null)"
 
-    override suspend fun request(turn: ProviderTurn<ProviderLaneB>, mode: RequestMode): ProviderTurnCommit<ProviderLaneB> = requestTyped(turn.typedTurn("OpenAI legacy") { it as? OpenAiLegacyLaneB }, mode)
+    override suspend fun request(turn: ProviderTurn<ProviderLaneB>, mode: RequestMode): ProviderTurnCommit<ProviderLaneB> = internalRealRequest(turn.typedTurn("OpenAI legacy") { it as? OpenAiLegacyLaneB }, mode)
 
-    private suspend fun requestTyped(turn: ProviderTurn<OpenAiLegacyLaneB>, mode: RequestMode) = when (mode) {
+    private suspend fun internalRealRequest(turn: ProviderTurn<OpenAiLegacyLaneB>, mode: RequestMode) = when (mode) {
         RequestMode.Static -> commit(turn, parseOpenAiChatResponse(postJson(chatCompletionsUrl(), headers(), chatCompletionsBody(turn, stream = false)), turn))
         is RequestMode.Streamed -> commit(turn, stream(turn, mode.observer))
     }
@@ -126,15 +132,48 @@ class OpenAiResponsesBackend(private val config: OpenAiResponsesBackendConfig) :
     override val shape = ProviderShape.OpenAiResponses
     override val capabilities = LlmCapabilities(setOf(LlmFeature.Content, LlmFeature.Streaming, LlmFeature.ImageInput, LlmFeature.ToolCalling, LlmFeature.JsonOutput, LlmFeature.Reasoning), setOf(LlmFeature.PromptCaching, LlmFeature.RemoteState))
 
-    override fun rebuildLaneB(rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB = OpenAiResponsesLaneB(rootRevision.id, nodes.lastOrNull()?.id, config.laneBKey(shape), openAiResponsesRoot(rootRevision.root), openAiResponsesInput(nodes), sessionBlackboard.string("openai.responses.response_id"), sessionBlackboard.onlyPrefixed("openai."))
+    override fun rebuildLaneB(rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB = OpenAiResponsesLaneB(rootRevision.id, nodes.lastOrNull()?.id, config.laneBKey(shape), openAiResponsesRoot(rootRevision.root), OpenAiResponsesContext.Stateless(openAiResponsesInput(nodes)), sessionBlackboard.openAiResponsesLaneBlackboard()).tidyAfterRebuild()
+
+    override suspend fun breakState(laneB: ProviderLaneB, rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB {
+        val lane = laneB as? OpenAiResponsesLaneB ?: return laneB
+        return lane.breakState(rootRevision, nodes, config, sessionBlackboard)
+    }
+
+    override suspend fun compact(laneB: ProviderLaneB, rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB {
+        val lane = laneB as? OpenAiResponsesLaneB ?: return laneB
+        val body = compactionBody(lane, config)
+        var source = lane
+
+        val raw = try {
+            postJson(compactUrl(), headers(), body)
+        } catch (throwable: LlmProviderException) {
+            if (!throwable.isOpenAiResponsesPreviousResponseUnsupported() || lane.context !is OpenAiResponsesContext.StatefulByPreviousId) throw throwable
+
+            source = lane.fallbackFromPreviousResponseUnsupported()
+            postJson(compactUrl(), headers(), compactionBody(source, config))
+        }
+
+        val output = raw["output"]?.jsonArrayOrNull()?.mapNotNull { it.jsonObjectOrNull() } ?: emptyList()
+        val broken = source.breakState(rootRevision, nodes, config, sessionBlackboard)
+        return if (output.isEmpty()) broken else broken.copy(context = OpenAiResponsesContext.Stateless(output, officialCompaction = true), blackboard = broken.blackboard.withAll(openAiResponsesBlackboard(raw)))
+    }
 
     override fun debugLaneB(laneB: ProviderLaneB?) = laneB?.let { debugLaneB(it as? OpenAiResponsesLaneB ?: return@let providerLaneBDebug("OpenAiResponsesLaneB(wrong type)", it)) } ?: "OpenAiResponsesLaneB(null)"
 
-    override suspend fun request(turn: ProviderTurn<ProviderLaneB>, mode: RequestMode): ProviderTurnCommit<ProviderLaneB> = requestTyped(turn.typedTurn("OpenAI responses") { it as? OpenAiResponsesLaneB }, mode)
+    override suspend fun request(turn: ProviderTurn<ProviderLaneB>, mode: RequestMode): ProviderTurnCommit<ProviderLaneB> = internalRealRequest(turn.typedTurn("OpenAI responses") { it as? OpenAiResponsesLaneB }, mode)
 
-    private suspend fun requestTyped(turn: ProviderTurn<OpenAiResponsesLaneB>, mode: RequestMode) = when (mode) {
-        RequestMode.Static -> commit(turn, parseOpenAiResponsesResponse(postJson(responsesUrl(), headers(), responsesBody(turn, stream = false)), turn))
-        is RequestMode.Streamed -> commit(turn, stream(turn, mode.observer))
+    private suspend fun internalRealRequest(turn: ProviderTurn<OpenAiResponsesLaneB>, mode: RequestMode): ProviderTurnCommit<OpenAiResponsesLaneB> {
+        try {
+            return when (mode) {
+                RequestMode.Static -> commit(turn, parseOpenAiResponsesResponse(postJson(responsesUrl(), headers(), responsesBody(turn, stream = false)), turn))
+
+                is RequestMode.Streamed -> commit(turn, stream(turn, mode.observer))
+            }
+        } catch (throwable: LlmProviderException) {
+            if (!throwable.isOpenAiResponsesPreviousResponseUnsupported() || turn.laneB.context !is OpenAiResponsesContext.StatefulByPreviousId) throw throwable
+
+            return internalRealRequest(turn.copy(laneB = turn.laneB.fallbackFromPreviousResponseUnsupported()), mode)
+        }
     }
 
     private suspend fun stream(turn: ProviderTurn<OpenAiResponsesLaneB>, observer: TurnObserver?): TurnResult {
@@ -180,11 +219,14 @@ class OpenAiResponsesBackend(private val config: OpenAiResponsesBackendConfig) :
             }
             return draft.complete(trace = TurnTrace(shape, turn.config.model))
         } catch (throwable: Throwable) {
+            if (throwable is LlmProviderException) throw throwable
             throw LlmTurnException(throwable.message ?: "OpenAI responses stream failed", throwable, draft.partial(trace = TurnTrace(shape, turn.config.model)))
         }
     }
 
     private fun responsesUrl() = "${config.baseUrl.trimEnd('/')}/responses"
+
+    private fun compactUrl() = "${config.baseUrl.trimEnd('/')}/responses/compact"
 
     private fun headers() = openAiHeaders(config.apiKey, config.organization, config.project, config.extraHeaders) // Org和项目被OpenAI新API吃
 
@@ -192,9 +234,15 @@ class OpenAiResponsesBackend(private val config: OpenAiResponsesBackendConfig) :
         appendLine(providerLaneBDebug("OpenAiResponsesLaneB", lane))
         appendLine("  root.instructions=${lane.root.instructions}")
         appendLine("  root.tools=${lane.root.tools}")
-        appendLine("  previousResponseId=${lane.previousResponseId}")
-        appendLine("  input:")
-        lane.input.forEachIndexed { index, input -> appendLine("    [$index] $input") }
+        when (val context = lane.context) {
+            is OpenAiResponsesContext.Stateless -> {
+                appendLine("  context=Stateless(canonicalCompaction=${context.officialCompaction})")
+                appendLine("  input:")
+                context.input.forEachIndexed { index, input -> appendLine("    [$index] $input") }
+            }
+
+            is OpenAiResponsesContext.StatefulByPreviousId -> appendLine("  context=PreviousResponse(${context.id}, shadowInput=${context.shadowInput.size})")
+        }
     }
 
     private fun responsesBody(turn: ProviderTurn<OpenAiResponsesLaneB>, stream: Boolean): JsonObject {
@@ -202,7 +250,16 @@ class OpenAiResponsesBackend(private val config: OpenAiResponsesBackendConfig) :
         val body = buildJsonObject {
             put("model", turn.config.model)
             lane.root.instructions?.let { put("instructions", it) }
-            put("input", openAiResponsesInput(lane, turn.requestNode.request))
+            when (val context = lane.context) {
+                is OpenAiResponsesContext.Stateless -> {
+                    put("input", openAiResponsesInput(context.input, turn.requestNode.request))
+                }
+
+                is OpenAiResponsesContext.StatefulByPreviousId -> {
+                    put("previous_response_id", context.id)
+                    put("input", openAiResponsesRequestInput(turn.requestNode.request).toJsonArray())
+                }
+            }
             turn.config.temperature?.let { put("temperature", it) }
             if (stream) put("stream", true)
 
@@ -214,13 +271,49 @@ class OpenAiResponsesBackend(private val config: OpenAiResponsesBackendConfig) :
             openAiResponsesTextFormat(turn.config.output)?.let { put("text", buildJsonObject { put("format", it) }) }
             openAiResponsesReasoning(turn.config.reasoning)?.let { put("reasoning", it) }
         }
-        return body.merge(turn.config.providerOptions[shape] ?: emptyJsonObject())
+        return body.merge(turn.config.providerOptions[shape] ?: emptyJsonObject()).withOpenAiResponsesInternalStateOptions(turn.config)
     }
 
     private fun commit(turn: ProviderTurn<OpenAiResponsesLaneB>, result: TurnResult): ProviderTurnCommit<OpenAiResponsesLaneB> {
         val lane = turn.laneB
-        val next = lane.copy(anchorNodeId = turn.resultNodeId, input = lane.input + openAiResponsesRequestInput(turn.requestNode.request) + openAiResponsesResultInput(result), previousResponseId = result.blackboard.string("openai.responses.response_id") ?: lane.previousResponseId, blackboard = lane.blackboard.withAll(result.blackboard.onlyPrefixed("openai."))).tidyAfterAppend()
-        return ProviderTurnCommit(next, result)
+        val output = openAiResponsesResultInput(result)
+        val responseId = result.blackboard.string("openai.responses.response_id")
+        val requestInput = openAiResponsesRequestInput(turn.requestNode.request)
+        val blackboard = lane.blackboard.withAll(result.blackboard.onlyPrefixed("openai."))
+        val resultBlackboard = result.blackboard.withAll(lane.blackboard.onlyPrefixed(OPENAI_RESPONSES_PREVIOUS_RESPONSE_UNSUPPORTED))
+        val context = when (val current = lane.context) {
+            is OpenAiResponsesContext.Stateless -> {
+                val shadowInput = current.input + requestInput + output
+                if (responseId != null && blackboard.string(OPENAI_RESPONSES_PREVIOUS_RESPONSE_UNSUPPORTED) != "true") OpenAiResponsesContext.StatefulByPreviousId(responseId, shadowInput) else OpenAiResponsesContext.Stateless(shadowInput, current.officialCompaction)
+            }
+
+            is OpenAiResponsesContext.StatefulByPreviousId -> {
+                val shadowInput = current.shadowInput + requestInput + output
+                if (responseId != null && blackboard.string(OPENAI_RESPONSES_PREVIOUS_RESPONSE_UNSUPPORTED) != "true") OpenAiResponsesContext.StatefulByPreviousId(responseId, shadowInput) else current.copy(shadowInput = shadowInput)
+            }
+        }
+        val next = lane.copy(anchorNodeId = turn.resultNodeId, context = context, blackboard = blackboard).tidyAfterAppend()
+        return ProviderTurnCommit(next, if (resultBlackboard == result.blackboard) result else result.copy(blackboard = resultBlackboard))
+    }
+
+    private fun compactionBody(lane: OpenAiResponsesLaneB, config: EffectiveLlmCallConfig) = buildJsonObject {
+        put("model", config.model)
+        lane.root.instructions?.let { put("instructions", it) }
+        when (val context = lane.context) {
+            is OpenAiResponsesContext.Stateless -> put("input", context.input.toJsonArray())
+            is OpenAiResponsesContext.StatefulByPreviousId -> put("previous_response_id", context.id)
+        }
+    }.merge((config.providerOptions[shape] ?: emptyJsonObject()).openAiResponsesCompactOptions())
+
+    private fun OpenAiResponsesLaneB.breakState(rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard) = when (context) {
+        is OpenAiResponsesContext.Stateless -> copy(blackboard = blackboard.without("openai.responses.response_id"))
+        is OpenAiResponsesContext.StatefulByPreviousId -> OpenAiResponsesLaneB(rootRevision.id, nodes.lastOrNull()?.id, config.laneBKey(shape), openAiResponsesRoot(rootRevision.root), OpenAiResponsesContext.Stateless(openAiResponsesInput(nodes)), sessionBlackboard.openAiResponsesLaneBlackboard()).tidyAfterRebuild()
+    }
+
+    // 滚回“无状态”去
+    private fun OpenAiResponsesLaneB.fallbackFromPreviousResponseUnsupported(): OpenAiResponsesLaneB {
+        val context = context as? OpenAiResponsesContext.StatefulByPreviousId ?: return this
+        return copy(context = OpenAiResponsesContext.Stateless(context.shadowInput), blackboard = blackboard.with(OPENAI_RESPONSES_PREVIOUS_RESPONSE_UNSUPPORTED, "true").without("openai.responses.response_id")).tidyAfterRebuild()
     }
 }
 
@@ -295,8 +388,8 @@ private fun openAiChatAssistantMessage(result: TurnResult) = buildJsonObject {
     })
 }
 
-private fun openAiResponsesInput(lane: OpenAiResponsesLaneB, request: TurnRequest) = buildJsonArray {
-    lane.input.forEach { add(it) }
+private fun openAiResponsesInput(input: List<JsonObject>, request: TurnRequest) = buildJsonArray {
+    input.forEach { add(it) }
     openAiResponsesRequestInput(request).forEach { add(it) }
 }
 
@@ -351,15 +444,146 @@ private fun openAiResponsesResultInput(result: TurnResult): List<JsonObject> {
     }
 }
 
+private fun openAiResponsesBlackboard(raw: JsonObject) = raw.string("id")?.let { LlmBlackboard.Empty.with("openai.responses.compaction_id", it) } ?: LlmBlackboard.Empty
+
 private fun OpenAiLegacyLaneB.tidyAfterAppend(): OpenAiLegacyLaneB {
     // 未来可在这里插入小整理：看尾部是否闭合成一波（Prompt-Answer），薄掉一波里不必重发的思考/Tool
     return this
 }
 
+// 这俩：如果之前是被官方压缩的，则不解盘
 private fun OpenAiResponsesLaneB.tidyAfterAppend(): OpenAiResponsesLaneB {
-    // 未来可在这里插入小整理：看尾部是否闭合成一波（Prompt-Answer），薄掉一波里不必重发的思考/Tool
-    return this
+    val context = context
+    if (context !is OpenAiResponsesContext.Stateless || context.officialCompaction) return this
+    return copy(context = context.copy(input = context.input.tidyLatestOpenAiResponsesWave()))
 }
+
+private fun OpenAiResponsesLaneB.tidyAfterRebuild(): OpenAiResponsesLaneB {
+    val context = context
+    if (context !is OpenAiResponsesContext.Stateless || context.officialCompaction) return this
+    return copy(context = context.copy(input = context.input.tidyOpenAiResponsesWaves()))
+}
+
+// 小压缩 Start
+
+private data class OpenAiResponsesWaveRange(val start: Int, val endExclusive: Int)
+
+// 将其中的元素按波聚合，对每个波进行整理，最后返回整理后的完整列表
+private fun List<JsonObject>.tidyOpenAiResponsesWaves(): List<JsonObject> {
+    val ranges = openAiResponsesWaveRanges()
+    if (ranges.isEmpty()) return this
+
+    val result = mutableListOf<JsonObject>()
+    var cursor = 0
+
+    ranges.forEach { range ->
+        result += subList(cursor, range.start)
+        result += tidiedOpenAiResponsesWave(range)
+        cursor = range.endExclusive
+    }
+
+    result += drop(cursor)
+    return if (result == this) this else result
+}
+
+private fun List<JsonObject>.openAiResponsesWaveRanges(): List<OpenAiResponsesWaveRange> {
+    val ranges = mutableListOf<OpenAiResponsesWaveRange>()
+    var start: Int? = null
+    var hasNonPrompt = false
+
+    fun flush(endExclusive: Int) {
+        start?.let { ranges += OpenAiResponsesWaveRange(it, endExclusive) }
+        start = null
+        hasNonPrompt = false
+    }
+
+    forEachIndexed { index, item ->
+        if (item.isOpenAiResponsesCompaction()) {
+            flush(index)
+            return@forEachIndexed
+        }
+
+        if (item.isOpenAiResponsesPrompt()) {
+            if (hasNonPrompt) flush(index)
+            if (start == null) start = index
+        } else if (start != null) hasNonPrompt = true
+    }
+
+    flush(size)
+    return ranges
+}
+
+private fun List<JsonObject>.tidyLatestOpenAiResponsesWave(): List<JsonObject> {
+    val range = latestOpenAiResponsesWaveRange() ?: return this
+    val tidied = tidiedOpenAiResponsesWave(range)
+    if (tidied == subList(range.start, range.endExclusive)) return this // 如果整理前和整理后的内容完全一致，则无需修改，直接返回原列表
+    return take(range.start) + tidied + drop(range.endExclusive)
+}
+
+private fun List<JsonObject>.tidiedOpenAiResponsesWave(range: OpenAiResponsesWaveRange) = subList(range.start, range.endExclusive).tidiedOpenAiResponsesWave()
+
+private fun List<JsonObject>.latestOpenAiResponsesWaveRange(): OpenAiResponsesWaveRange? {
+    var endExclusive = size // 初始化右边界（不包含）为整个列表的长度
+
+    // 从后往前寻找波的结束位置，跳过列表末尾所有属于压缩类型的元素
+    while (endExclusive > 0 && this[endExclusive - 1].isOpenAiResponsesCompaction()) endExclusive--
+    if (endExclusive == 0) return null // 全是压缩过的，直接返回
+
+    // 逆序找Prompt
+    var promptIndex = -1
+    for (index in endExclusive - 1 downTo 0) {
+        val item = this[index]
+
+        // 遇到了压缩就停
+        if (item.isOpenAiResponsesCompaction()) break
+
+        // 找到Prompt就记录然后停
+        if (item.isOpenAiResponsesPrompt()) {
+            promptIndex = index
+            break
+        }
+    }
+    if (promptIndex < 0) return null // 这是说明，没有完整的一波，直接返回（不处理）
+
+    // 调整Prompt起始点：如果再左也是就加入
+    while (promptIndex > 0 && this[promptIndex - 1].isOpenAiResponsesPrompt()) promptIndex--
+    return OpenAiResponsesWaveRange(promptIndex, endExclusive)
+}
+
+private fun JsonObject.isOpenAiResponsesPrompt() = string("role") == "user" && string("type") != "function_call_output" && string("type") != "computer_call_output" && !hasOpenAiResponsesContentType("function_call_output")
+
+private fun JsonObject.isOpenAiResponsesFinalMessage() = string("type").let { it == null || it == "message" } && string("role") == "assistant" && !containsKey("call_id") && hasOpenAiResponsesVisibleContent()
+
+// 界定好Wave以后，都是调用这个来压缩
+private fun List<JsonObject>.tidiedOpenAiResponsesWave(): List<JsonObject> {
+    val last = lastOrNull() ?: return this
+    if (!last.isOpenAiResponsesFinalMessage()) return this
+    val promptCount = takeWhile { it.isOpenAiResponsesPrompt() }.size
+    if (promptCount == 0) return this
+    val outputs = drop(promptCount)
+    val lastToolishIndex = outputs.indexOfLast { it.isOpenAiResponsesToolish() }
+    val finalMessages = outputs.drop(lastToolishIndex + 1).filter { it.isOpenAiResponsesFinalMessage() }.takeIf { it.isNotEmpty() } ?: outputs.filter { it.isOpenAiResponsesFinalMessage() }
+    val nonCommentary = finalMessages.filter { it.string("phase") != "commentary" }
+    return take(promptCount) + (nonCommentary.ifEmpty { finalMessages })
+}
+
+private fun JsonObject.hasOpenAiResponsesVisibleContent(): Boolean {
+    string("content")?.takeIf { it.isNotBlank() }?.let { return true }
+    return this["content"]?.jsonArrayOrNull().orEmpty().any { element ->
+        val content = element.jsonObjectOrNull() ?: return@any false
+        content.string("type") in setOf("output_text", "refusal") || content.string("text")?.isNotBlank() == true || content.string("refusal")?.isNotBlank() == true
+    }
+}
+
+private fun JsonObject.hasOpenAiResponsesContentType(type: String) = this["content"]?.jsonArrayOrNull().orEmpty().any { it.jsonObjectOrNull()?.string("type") == type }
+
+private fun JsonObject.isOpenAiResponsesCompaction() = string("type") == "compaction" || string("type") == "compaction_trigger"
+
+private fun JsonObject.isOpenAiResponsesToolish() = string("type")?.contains("call") == true || containsKey("call_id")
+
+// 小压缩 End
+
+private fun Iterable<JsonElement>.toJsonArray() = buildJsonArray { forEach { add(it) } }
 
 private fun openAiChatInputContent(parts: List<ContentPart>): JsonElement {
     if (parts.all { it is ContentPart.Text }) return JsonPrimitive(parts.plainText())
@@ -469,6 +693,26 @@ private fun openAiResponsesReasoning(reasoning: ReasoningLevel): JsonObject? = w
         put("summary", "auto")
     }
 }
+
+private fun JsonObject.withOpenAiResponsesInternalStateOptions(config: EffectiveLlmCallConfig) = buildJsonObject {
+    this@withOpenAiResponsesInternalStateOptions.forEach { (key, value) -> if (key != "include" && key != "store") put(key, value) } // 非特色Key，就设上
+
+    val include = (this@withOpenAiResponsesInternalStateOptions["include"]?.jsonArrayOrNull().orEmpty() + openAiResponsesInternalInclude(config)).distinct()
+    if (include.isNotEmpty()) put("include", include.toJsonArray())
+    put("store", true) // 强开Store
+}
+
+private fun openAiResponsesInternalInclude(config: EffectiveLlmCallConfig) = if (config.reasoning == ReasoningLevel.Off) emptyList() else listOf(JsonPrimitive("reasoning.encrypted_content"))
+
+private fun JsonObject.openAiResponsesCompactOptions() = buildJsonObject {
+    listOf("include", "metadata", "service_tier", "user").forEach { key -> this@openAiResponsesCompactOptions[key]?.let { put(key, it) } }
+}
+
+private fun LlmBlackboard.openAiResponsesLaneBlackboard() = onlyPrefixed("openai.").without("openai.responses.response_id")
+
+private const val OPENAI_RESPONSES_PREVIOUS_RESPONSE_UNSUPPORTED = "openai.responses.previous_response_id_unsupported"
+
+private fun LlmProviderException.isOpenAiResponsesPreviousResponseUnsupported() = body.contains("previous_response_id") && (body.contains("unsupported", ignoreCase = true) || body.contains("only supported", ignoreCase = true))
 
 private fun JsonObject.openAiResponsesToolKey() = string("call_id") ?: string("item_id") ?: int("output_index")?.toString()
 

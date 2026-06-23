@@ -10,6 +10,7 @@ private data class GeminiLaneB(override val rootRevisionId: LlmNodeId, override 
     override val shape = ProviderShape.Gemini
 }
 
+// TODO：小压缩
 class GeminiBackend(private val config: GeminiBackendConfig) : HttpProviderBackend() {
     override val shape = ProviderShape.Gemini
     override val capabilities = LlmCapabilities(setOf(LlmFeature.Content, LlmFeature.Streaming, LlmFeature.ImageInput, LlmFeature.ToolCalling, LlmFeature.JsonOutput, LlmFeature.Reasoning), setOf(LlmFeature.PromptCaching, LlmFeature.RemoteState))
@@ -18,10 +19,11 @@ class GeminiBackend(private val config: GeminiBackendConfig) : HttpProviderBacke
 
     override fun debugLaneB(laneB: ProviderLaneB?) = laneB?.let { debugLaneB(it as? GeminiLaneB ?: return@let providerLaneBDebug("GeminiLaneB(wrong type)", it)) } ?: "GeminiLaneB(null)"
 
-    override suspend fun request(turn: ProviderTurn<ProviderLaneB>, mode: RequestMode): ProviderTurnCommit<ProviderLaneB> = requestTyped(turn.typedTurn("Gemini") { it as? GeminiLaneB }, mode)
+    override suspend fun request(turn: ProviderTurn<ProviderLaneB>, mode: RequestMode): ProviderTurnCommit<ProviderLaneB> = internalRealRequest(turn.typedTurn("Gemini") { it as? GeminiLaneB }, mode)
 
-    private suspend fun requestTyped(turn: ProviderTurn<GeminiLaneB>, mode: RequestMode) = when (mode) {
+    private suspend fun internalRealRequest(turn: ProviderTurn<GeminiLaneB>, mode: RequestMode) = when (mode) {
         RequestMode.Static -> commit(turn, parseGeminiResponse(postGeminiJson(geminiUrl(turn.config.model, stream = false), headers(), geminiBody(turn)), turn))
+
         is RequestMode.Streamed -> commit(turn, stream(turn, mode.observer))
     }
 

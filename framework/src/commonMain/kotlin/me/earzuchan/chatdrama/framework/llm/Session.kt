@@ -33,7 +33,7 @@ interface ProviderLaneB {
     val blackboard: LlmBlackboard
 }
 
-data class ProviderLaneBConfigKey(val model: String, val reasoning: ReasoningLevel, val cache: CachePreference, val remoteState: RemoteStatePreference, val output: OutputContract, val providerOptions: JsonObject = emptyJsonObject())
+data class ProviderLaneBConfigKey(val model: String, val reasoning: ReasoningLevel, val cache: CachePreference, val output: OutputContract, val providerOptions: JsonObject = emptyJsonObject())
 
 data class ProviderBinding(val backend: ProviderBackend, var laneB: ProviderLaneB? = null, var defaults: LlmCallConfig = LlmCallConfig())
 
@@ -64,7 +64,7 @@ class LlmSession private constructor(private val sessionTag: String, private val
             laneB = provider.backend.maybeCompact(laneB, requestNode, effective)
             provider.laneB = laneB
 
-            val commit = provider.backend.request(ProviderTurn<ProviderLaneB>(laneB, requestNode, resultNodeId, effective, blackboardOf(activePath, requestNode)), mode)
+            val commit = provider.backend.request(ProviderTurn(laneB, requestNode, resultNodeId, effective, blackboardOf(activePath, requestNode)), mode)
             val result = commit.result
             val resultNode = TurnResultNode(resultNodeId, requestNode.id, activeRootId, result, result.blackboard)
 
@@ -81,11 +81,19 @@ class LlmSession private constructor(private val sessionTag: String, private val
         }
     }
 
-    suspend fun compactForProvideRequestSending(config: LlmCallConfig = LlmCallConfig()) = compactLaneB()
+    suspend fun compactForProvideRequestSending(config: LlmCallConfig = LlmCallConfig()) = compactLaneB(config)
 
     private suspend fun compactLaneB(config: LlmCallConfig = LlmCallConfig()) { // 实为：压缩 LaneB
         val effective = resolveConfig(config)
-        provider.laneB = provider.backend.compact(ensureLaneB(effective), effective)
+        val path = activePath()
+        provider.laneB = provider.backend.compact(ensureLaneB(effective, path), activeRoot, path, effective, blackboardOf(path))
+    }
+
+    // TODO：可能要删掉。状态是系统自动维护或许更美丽？
+    suspend fun breakProviderState(config: LlmCallConfig = LlmCallConfig()) {
+        val effective = resolveConfig(config)
+        val path = activePath()
+        provider.laneB = provider.backend.breakState(ensureLaneB(effective, path), activeRoot, path, effective, blackboardOf(path))
     }
 
     override fun activePath(): List<SessionNode> {
@@ -161,7 +169,7 @@ class LlmSession private constructor(private val sessionTag: String, private val
     // 结合本地配置进行覆写
     private fun resolveConfig(config: LlmCallConfig): EffectiveLlmCallConfig {
         val merged = provider.defaults.over(defaults).over(config)
-        return EffectiveLlmCallConfig(merged.model ?: error("No model configured for ${provider.backend.shape}."), merged.reasoning ?: ReasoningLevel.Off, merged.cache ?: CachePreference.Prefer, merged.remoteState ?: RemoteStatePreference.Off, merged.output ?: OutputContract.Text, merged.temperature, merged.providerOptions)
+        return EffectiveLlmCallConfig(merged.model ?: error("No model configured for ${provider.backend.shape}."), merged.reasoning ?: ReasoningLevel.Off, merged.cache ?: CachePreference.Prefer, merged.output ?: OutputContract.Text, merged.temperature, merged.providerOptions)
     }
 
     // 检查：是否失效以致重建LaneB
@@ -188,6 +196,6 @@ class LlmSession private constructor(private val sessionTag: String, private val
     }
 }
 
-internal fun EffectiveLlmCallConfig.laneBKey(shape: ProviderShape) = ProviderLaneBConfigKey(model, reasoning, cache, remoteState, output, providerOptions[shape] ?: emptyJsonObject())
+internal fun EffectiveLlmCallConfig.laneBKey(shape: ProviderShape) = ProviderLaneBConfigKey(model, reasoning, cache, output, providerOptions[shape] ?: emptyJsonObject())
 
 internal fun <B : ProviderLaneB> ProviderTurn<*>.typedTurn(laneName: String, cast: (ProviderLaneB) -> B?) = ProviderTurn(cast(laneB) ?: error("LaneB is not $laneName: ${laneB::class.simpleName}"), requestNode, resultNodeId, config, sessionBlackboard)

@@ -18,8 +18,11 @@ interface ProviderBackend {
 
     suspend fun request(turn: ProviderTurn<ProviderLaneB>, mode: RequestMode): ProviderTurnCommit<ProviderLaneB>
 
-    suspend fun compact(laneB: ProviderLaneB, config: EffectiveLlmCallConfig): ProviderLaneB {
-        // TODO：未来可在这里插入大压缩：手动触发，压 laneB
+    // 或许要删除
+    suspend fun breakState(laneB: ProviderLaneB, rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB = laneB
+
+    suspend fun compact(laneB: ProviderLaneB, rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB {
+        // TODO：未来给各大压缩：手动触发，压 laneB。这里是默认实现，可被重写
 
         // 先优先接入OpenAiResponses、Claude的官方压缩，没有官方压缩的则可能不能压缩（不是不能，但得我们代劳：我们得使用用户的模型，在另外的上下文进行压缩，还有失败的风险）
 
@@ -27,7 +30,7 @@ interface ProviderBackend {
     }
 
     suspend fun maybeCompact(laneB: ProviderLaneB, requestNode: TurnRequestNode, config: EffectiveLlmCallConfig): ProviderLaneB {
-        // 未来，按阈值触发大压缩：使用场景发新 turn 前
+        // TODO：未来，按阈值（比如说八十）触发大压缩：使用场景发新 turn 前
         return laneB
     }
 

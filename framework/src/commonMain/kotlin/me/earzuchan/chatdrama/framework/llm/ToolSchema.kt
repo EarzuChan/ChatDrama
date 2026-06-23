@@ -8,12 +8,14 @@ private fun toolObjectSchema(args: List<ToolArg>, strict: Boolean) = buildJsonOb
     put("type", "object")
     put("properties", buildJsonObject { args.forEach { put(it.name, it.schema(strict)) } })
     args.filter { strict || it.required }.map { it.name }.takeIf { it.isNotEmpty() }?.let { required -> put("required", buildJsonArray { required.forEach { add(it) } }) }
+
     if (strict) put("additionalProperties", false)
 }
 
 private fun ToolArg.schema(strict: Boolean): JsonObject {
     val schema = type.schema(strict)
     if (description == null) return schema
+
     return buildJsonObject {
         schema.forEach { (key, value) -> put(key, value) }
         put("description", description)

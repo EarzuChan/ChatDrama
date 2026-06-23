@@ -12,6 +12,7 @@ private data class ClaudeLaneB(override val rootRevisionId: LlmNodeId, override 
     override val shape = ProviderShape.Claude
 }
 
+// TODO：小压缩
 class ClaudeBackend(private val config: ClaudeBackendConfig) : HttpProviderBackend() {
     override val shape = ProviderShape.Claude
     override val capabilities = LlmCapabilities(setOf(LlmFeature.Content, LlmFeature.Streaming, LlmFeature.ImageInput, LlmFeature.ToolCalling, LlmFeature.Reasoning), setOf(LlmFeature.JsonOutput, LlmFeature.PromptCaching))
@@ -20,10 +21,11 @@ class ClaudeBackend(private val config: ClaudeBackendConfig) : HttpProviderBacke
 
     override fun debugLaneB(laneB: ProviderLaneB?) = laneB?.let { debugLaneB(it as? ClaudeLaneB ?: return@let providerLaneBDebug("ClaudeLaneB(wrong type)", it)) } ?: "ClaudeLaneB(null)"
 
-    override suspend fun request(turn: ProviderTurn<ProviderLaneB>, mode: RequestMode): ProviderTurnCommit<ProviderLaneB> = requestTyped(turn.typedTurn("Claude") { it as? ClaudeLaneB }, mode)
+    override suspend fun request(turn: ProviderTurn<ProviderLaneB>, mode: RequestMode): ProviderTurnCommit<ProviderLaneB> = internalRealRequest(turn.typedTurn("Claude") { it as? ClaudeLaneB }, mode)
 
-    private suspend fun requestTyped(turn: ProviderTurn<ClaudeLaneB>, mode: RequestMode) = when (mode) {
+    private suspend fun internalRealRequest(turn: ProviderTurn<ClaudeLaneB>, mode: RequestMode) = when (mode) {
         RequestMode.Static -> commit(turn, parseClaudeResponse(postJson(messagesUrl(), headers(), claudeBody(turn, stream = false)), turn))
+
         is RequestMode.Streamed -> commit(turn, stream(turn, mode.observer))
     }
 
