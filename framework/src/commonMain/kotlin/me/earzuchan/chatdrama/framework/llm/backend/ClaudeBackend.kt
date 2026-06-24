@@ -1,8 +1,10 @@
-package me.earzuchan.chatdrama.framework.llm
+package me.earzuchan.chatdrama.framework.llm.backend
 
 import kotlinx.serialization.json.*
+import me.earzuchan.chatdrama.framework.llm.*
+import me.earzuchan.chatdrama.framework.llm.misc.*
 
-private const val CLAUDE_PROTOCOL_MAX_OUTPUT_TOKENS = 8192 // 128000 // CLAUDE 必填这一块，128k有感觉吗
+private const val CLAUDE_PROTOCOL_MAX_OUTPUT_TOKENS = 8192 // 128000 // CLAUDE 必填这一块，128k有感觉吗。8192是我没钱了省钱临时搞一下
 
 data class ClaudeBackendConfig(val apiKey: String, val baseUrl: String = "https://api.anthropic.com", val anthropicVersion: String = "2023-06-01", val extraHeaders: Map<String, String> = emptyMap())
 

@@ -1,5 +1,7 @@
 package me.earzuchan.chatdrama.framework.llm
 
+import me.earzuchan.chatdrama.framework.llm.misc.asText
+
 // 这几个比较无聊
 
 fun textPart(text: String) = ContentPart.Text(text)

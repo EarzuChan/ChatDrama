@@ -1,6 +1,7 @@
-package me.earzuchan.chatdrama.framework.llm
+package me.earzuchan.chatdrama.framework.llm.misc
 
 import kotlinx.serialization.json.*
+import me.earzuchan.chatdrama.framework.llm.*
 
 internal fun ToolDefinition.inputSchema(strict: Boolean = false) = toolObjectSchema(args, strict)
 

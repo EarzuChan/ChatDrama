@@ -2,6 +2,7 @@ package me.earzuchan.chatdrama.framework.llm
 
 import io.ktor.util.PlatformUtils
 import kotlinx.coroutines.test.runTest
+import me.earzuchan.chatdrama.framework.llm.backend.*
 import me.earzuchan.chatdrama.framework.di.frameworkModule
 import me.earzuchan.chatdrama.framework.di.frameworkPlatformModule
 import kotlin.test.BeforeTest
@@ -28,8 +29,8 @@ class LlmApiIntegrationTest {
 
     @Test
     fun tempDemo() = runTest {
-        // val (backend, model) = OpenAiLegacyBackend(OpenAiLegacyBackendConfig(DEEPSEEK_KEY, DEEPSEEK_BASE_URL)) to DEEPSEEK_MODEL_V4_PRO
-        val (backend, model) = OpenAiResponsesBackend(OpenAiResponsesBackendConfig(VANYO_OPENAI_KEY, "$VANYO_BASE_URL/v1")) to VANYO_MODEL_GPT5_5
+        val (backend, model) = OpenAiLegacyBackend(OpenAiLegacyBackendConfig(DEEPSEEK_KEY, DEEPSEEK_BASE_URL)) to DEEPSEEK_MODEL_V4_PRO
+        // val (backend, model) = OpenAiResponsesBackend(OpenAiResponsesBackendConfig(VANYO_OPENAI_KEY, "$VANYO_BASE_URL/v1")) to VANYO_MODEL_GPT5_5
         // val (backend, model) = GeminiBackend(GeminiBackendConfig(GEMINI_KEY)) to GEMINI_MODEL_3_FLASH
         // val (backend, model) = ClaudeBackend(ClaudeBackendConfig(OPENROUTER_KEY,OPENROUTER_BASE_URL)) to OPENROUTER_MODEL_CLAUDE_SONNET_4_6
 
@@ -65,6 +66,46 @@ class LlmApiIntegrationTest {
         ).also { log("Result2", it) }
 
         result2.items.filterIsInstance<TurnItem.Content>().joinToString("\n") { it.text() }.also { log("Answer", it) }
+
+        log("LaneA", "\n${session.debugLaneA()}")
+        log("LaneB", "\n${session.debugLaneB()}")
+    }
+
+    @Test
+    fun tempDemo2() = runTest {
+        val (backend1, model1) = OpenAiLegacyBackend(OpenAiLegacyBackendConfig(DEEPSEEK_KEY, DEEPSEEK_BASE_URL)) to DEEPSEEK_MODEL_V4_PRO
+        val (backend2, model2) = OpenAiResponsesBackend(OpenAiResponsesBackendConfig(VANYO_OPENAI_KEY, "$VANYO_BASE_URL/v1")) to VANYO_MODEL_GPT5_5
+        val (backend3, model3) = GeminiBackend(GeminiBackendConfig(GEMINI_KEY)) to GEMINI_MODEL_3_FLASH
+        val (backend4, model4) = ClaudeBackend(ClaudeBackendConfig(OPENROUTER_KEY,OPENROUTER_BASE_URL)) to OPENROUTER_MODEL_CLAUDE_SONNET_4_6
+
+        val session = LlmSession(
+            backend = backend1,
+            root = SessionRoot(instructions = textContentParts("你是一个乖乖的AI，现在正在进行一些能力测试")),
+            defaults = LlmCallConfig(model = model1, reasoning = ReasoningLevel.Low)
+        )
+
+        session.request(TurnRequest(listOf(textContentInputItem("收到请回Pong")))).also { log("Result1", it) }
+
+        log("LaneA", "\n${session.debugLaneA()}")
+        log("LaneB", "\n${session.debugLaneB()}")
+
+        session.switchProvider(backend2, LlmCallConfig(model = model2, reasoning = ReasoningLevel.Low))
+
+        session.request(TurnRequest(listOf(textContentInputItem("再次回复一次")))).also { log("Result2", it) }
+
+        log("LaneA", "\n${session.debugLaneA()}")
+        log("LaneB", "\n${session.debugLaneB()}")
+
+        session.switchProvider(backend3, LlmCallConfig(model = model3, reasoning = ReasoningLevel.Low))
+
+        session.request(TurnRequest(listOf(textContentInputItem("不错，再来一次")))).also { log("Result3", it) }
+
+        log("LaneA", "\n${session.debugLaneA()}")
+        log("LaneB", "\n${session.debugLaneB()}")
+
+        session.switchProvider(backend4, LlmCallConfig(model = model4, reasoning = ReasoningLevel.Low))
+
+        session.request(TurnRequest(listOf(textContentInputItem("最后回一次")))).also { log("Result4", it) }
 
         log("LaneA", "\n${session.debugLaneA()}")
         log("LaneB", "\n${session.debugLaneB()}")

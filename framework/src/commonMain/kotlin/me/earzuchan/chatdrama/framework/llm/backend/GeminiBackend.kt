@@ -1,6 +1,8 @@
-package me.earzuchan.chatdrama.framework.llm
+package me.earzuchan.chatdrama.framework.llm.backend
 
 import kotlinx.serialization.json.*
+import me.earzuchan.chatdrama.framework.llm.*
+import me.earzuchan.chatdrama.framework.llm.misc.*
 
 data class GeminiBackendConfig(val apiKey: String, val baseUrl: String = "https://generativelanguage.googleapis.com", val apiVersion: String = "v1beta", val extraHeaders: Map<String, String> = emptyMap())
 

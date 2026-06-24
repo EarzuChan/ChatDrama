@@ -1,6 +1,8 @@
 package me.earzuchan.chatdrama.framework.llm
 
 import kotlinx.serialization.json.JsonObject
+import me.earzuchan.chatdrama.framework.llm.backend.ProviderBackend
+import me.earzuchan.chatdrama.framework.llm.misc.emptyJsonObject
 
 data class LlmNodeId(val value: String) { override fun toString() = value }
 
@@ -35,14 +37,12 @@ interface ProviderLaneB {
 
 data class ProviderLaneBConfigKey(val model: String, val reasoning: ReasoningLevel, val cache: CachePreference, val output: OutputContract, val providerOptions: JsonObject = emptyJsonObject())
 
-data class ProviderBinding(val backend: ProviderBackend, var laneB: ProviderLaneB? = null, var defaults: LlmCallConfig = LlmCallConfig())
-
 data class ProviderTurn<out B : ProviderLaneB>(val laneB: B, val requestNode: TurnRequestNode, val resultNodeId: LlmNodeId, val config: EffectiveLlmCallConfig, val sessionBlackboard: LlmBlackboard)
 
 data class ProviderTurnCommit<out B : ProviderLaneB>(val laneB: B, val result: TurnResult)
 
-class LlmSession private constructor(private val sessionTag: String, private val roots: MutableMap<LlmNodeId, RootRevision>, private val nodes: MutableMap<LlmNodeId, SessionNode>, private var activeRootId: LlmNodeId, private var activeNodeId: LlmNodeId?, var provider: ProviderBinding, var defaults: LlmCallConfig, private val sessionBlackboard: LlmBlackboard, private var nextOrdinal: Int) : LaneA {
-    constructor(backend: ProviderBackend, root: SessionRoot = SessionRoot(), defaults: LlmCallConfig = LlmCallConfig(), blackboard: LlmBlackboard = LlmBlackboard.Empty, providerDefaults: LlmCallConfig = LlmCallConfig()) : this(newSessionTag(), mutableMapOf(), mutableMapOf(), LlmNodeId("pending"), null, ProviderBinding(backend, defaults = providerDefaults), defaults, blackboard, 0) {
+class LlmSession private constructor(private val sessionTag: String, private val roots: MutableMap<LlmNodeId, RootRevision>, private val nodes: MutableMap<LlmNodeId, SessionNode>, private var activeRootId: LlmNodeId, private var activeNodeId: LlmNodeId?, var backend: ProviderBackend, private var laneB: ProviderLaneB?, var defaults: LlmCallConfig, private val sessionBlackboard: LlmBlackboard, private var nextOrdinal: Int) : LaneA {
+    constructor(backend: ProviderBackend, root: SessionRoot = SessionRoot(), defaults: LlmCallConfig = LlmCallConfig(), blackboard: LlmBlackboard = LlmBlackboard.Empty) : this(newSessionTag(), mutableMapOf(), mutableMapOf(), LlmNodeId("pending"), null, backend, null, defaults, blackboard, 0) {
         val rootId = newId("root")
         roots[rootId] = RootRevision(rootId, root)
         activeRootId = rootId
@@ -61,23 +61,23 @@ class LlmSession private constructor(private val sessionTag: String, private val
 
         try {
             var laneB = ensureLaneB(effective, activePath)
-            laneB = provider.backend.maybeCompact(laneB, requestNode, effective)
-            provider.laneB = laneB
+            laneB = backend.maybeCompact(laneB, requestNode, effective)
+            this.laneB = laneB
 
-            val commit = provider.backend.request(ProviderTurn(laneB, requestNode, resultNodeId, effective, blackboardOf(activePath, requestNode)), mode)
+            val commit = backend.request(ProviderTurn(laneB, requestNode, resultNodeId, effective, blackboardOf(activePath, requestNode)), mode)
             val result = commit.result
             val resultNode = TurnResultNode(resultNodeId, requestNode.id, activeRootId, result, result.blackboard)
 
             nodes[requestNode.id] = requestNode
             nodes[resultNode.id] = resultNode
             activeNodeId = resultNode.id
-            provider.laneB = commit.laneB
+            this.laneB = commit.laneB
 
             return result
         } catch (throwable: LlmTurnException) {
             throw throwable
         } catch (throwable: Throwable) {
-            throw LlmTurnException(throwable.message ?: throwable::class.simpleName.orEmpty().ifBlank { "LLM turn failed" }, throwable, trace = TurnTrace(shape = provider.backend.shape, model = effective.model))
+            throw LlmTurnException(throwable.message ?: throwable::class.simpleName.orEmpty().ifBlank { "LLM turn failed" }, throwable, trace = TurnTrace(shape = backend.shape, model = effective.model))
         }
     }
 
@@ -86,14 +86,14 @@ class LlmSession private constructor(private val sessionTag: String, private val
     private suspend fun compactLaneB(config: LlmCallConfig = LlmCallConfig()) { // 实为：压缩 LaneB
         val effective = resolveConfig(config)
         val path = activePath()
-        provider.laneB = provider.backend.compact(ensureLaneB(effective, path), activeRoot, path, effective, blackboardOf(path))
+        laneB = backend.compact(ensureLaneB(effective, path), activeRoot, path, effective, blackboardOf(path))
     }
 
     // TODO：可能要删掉。状态是系统自动维护或许更美丽？
     suspend fun breakProviderState(config: LlmCallConfig = LlmCallConfig()) {
         val effective = resolveConfig(config)
         val path = activePath()
-        provider.laneB = provider.backend.breakState(ensureLaneB(effective, path), activeRoot, path, effective, blackboardOf(path))
+        laneB = backend.breakState(ensureLaneB(effective, path), activeRoot, path, effective, blackboardOf(path))
     }
 
     override fun activePath(): List<SessionNode> {
@@ -127,7 +127,7 @@ class LlmSession private constructor(private val sessionTag: String, private val
         activePath().forEach { appendLine("----${it.id}") }
     }
 
-    fun debugLaneB() = provider.backend.debugLaneB(provider.laneB)
+    fun debugLaneB() = backend.debugLaneB(laneB)
 
     fun checkout(nodeId: LlmNodeId?) {
         if (nodeId != null && nodeId !in nodes) error("Unknown node: $nodeId")
@@ -136,12 +136,15 @@ class LlmSession private constructor(private val sessionTag: String, private val
 
     fun fork(from: LlmNodeId? = activeNodeId): LlmSession {
         if (from != null && from !in nodes) error("Unknown node: $from")
-        val reusableLaneB = provider.laneB?.takeIf { it.shape == provider.backend.shape && it.rootRevisionId == activeRootId && it.anchorNodeId == from }
-        return LlmSession(newSessionTag(), roots.toMutableMap(), nodes.toMutableMap(), activeRootId, from, ProviderBinding(provider.backend, reusableLaneB, provider.defaults), defaults, sessionBlackboard, nextOrdinal)
+        val reusableLaneB = laneB?.takeIf { it.shape == backend.shape && it.rootRevisionId == activeRootId && it.anchorNodeId == from }
+        return LlmSession(newSessionTag(), roots.toMutableMap(), nodes.toMutableMap(), activeRootId, from, backend, reusableLaneB, defaults, sessionBlackboard, nextOrdinal)
     }
 
+    // 原地切换供应商
     fun switchProvider(backend: ProviderBackend, defaults: LlmCallConfig = LlmCallConfig()) {
-        provider = ProviderBinding(backend, defaults = defaults)
+        this.backend = backend
+        this.defaults = defaults
+        laneB = null
     }
 
     fun editRoot(transform: (SessionRoot) -> SessionRoot) {
@@ -168,17 +171,17 @@ class LlmSession private constructor(private val sessionTag: String, private val
 
     // 结合本地配置进行覆写
     private fun resolveConfig(config: LlmCallConfig): EffectiveLlmCallConfig {
-        val merged = provider.defaults.over(defaults).over(config)
-        return EffectiveLlmCallConfig(merged.model ?: error("No model configured for ${provider.backend.shape}."), merged.reasoning ?: ReasoningLevel.Off, merged.cache ?: CachePreference.Prefer, merged.output ?: OutputContract.Text, merged.temperature, merged.providerOptions)
+        val merged = defaults.over(config)
+        return EffectiveLlmCallConfig(merged.model ?: error("No model configured for ${backend.shape}."), merged.reasoning ?: ReasoningLevel.Off, merged.cache ?: CachePreference.Prefer, merged.output ?: OutputContract.Text, merged.temperature, merged.providerOptions)
     }
 
     // 检查：是否失效以致重建LaneB
     private fun ensureLaneB(config: EffectiveLlmCallConfig, path: List<SessionNode> = activePath()): ProviderLaneB {
-        val current = provider.laneB
-        val key = config.laneBKey(provider.backend.shape)
+        val current = laneB
+        val key = config.laneBKey(backend.shape)
 
-        if (current != null && current.shape == provider.backend.shape && current.rootRevisionId == activeRootId && current.anchorNodeId == activeNodeId && current.configKey == key) return current
-        return provider.backend.rebuildLaneB(activeRoot, path, config, blackboardOf(path)).also { provider.laneB = it }
+        if (current != null && current.shape == backend.shape && current.rootRevisionId == activeRootId && current.anchorNodeId == activeNodeId && current.configKey == key) return current
+        return backend.rebuildLaneB(activeRoot, path, config, blackboardOf(path)).also { laneB = it }
     }
 
     private fun blackboardOf(path: List<SessionNode>, extraNode: SessionNode? = null): LlmBlackboard {

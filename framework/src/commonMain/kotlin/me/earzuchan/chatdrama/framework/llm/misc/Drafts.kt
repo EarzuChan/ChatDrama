@@ -1,4 +1,6 @@
-package me.earzuchan.chatdrama.framework.llm
+package me.earzuchan.chatdrama.framework.llm.misc
+
+import me.earzuchan.chatdrama.framework.llm.*
 
 internal class TurnDraft(private val output: OutputContract, private val observer: TurnObserver? = null) {
     private val items = mutableListOf<DraftItem>()

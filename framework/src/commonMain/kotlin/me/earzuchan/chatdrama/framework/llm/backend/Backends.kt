@@ -1,4 +1,4 @@
-package me.earzuchan.chatdrama.framework.llm
+package me.earzuchan.chatdrama.framework.llm.backend
 
 import io.ktor.client.*
 import io.ktor.client.request.*
@@ -6,6 +6,8 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.utils.io.*
 import kotlinx.serialization.json.*
+import me.earzuchan.chatdrama.framework.llm.*
+import me.earzuchan.chatdrama.framework.llm.misc.*
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 
