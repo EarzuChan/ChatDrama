@@ -8,16 +8,18 @@ data class GeminiBackendConfig(val apiKey: String, val baseUrl: String = "https:
 
 private data class GeminiRoot(val systemInstruction: JsonObject? = null, val tools: JsonArray? = null, val toolConfig: JsonObject? = null)
 
-private data class GeminiLaneB(override val rootRevisionId: LlmNodeId, override val anchorNodeId: LlmNodeId?, override val configKey: ProviderLaneBConfigKey, val root: GeminiRoot, val contents: List<JsonObject>, override val blackboard: LlmBlackboard = LlmBlackboard.Empty) : ProviderLaneB {
+private data class GeminiLaneB(override val rootRevisionId: LlmNodeId, override val anchorNodeId: LlmNodeId?, override val configKey: ProviderLaneBConfigKey, val root: GeminiRoot, val contents: List<JsonObject>, val textualizedToolIds: Set<String> = emptySet(), override val blackboard: LlmBlackboard = LlmBlackboard.Empty) : ProviderLaneB {
     override val shape = ProviderShape.Gemini
 }
 
-// TODO：小压缩
 class GeminiBackend(private val config: GeminiBackendConfig) : HttpProviderBackend() {
     override val shape = ProviderShape.Gemini
     override val capabilities = LlmCapabilities(setOf(LlmFeature.Content, LlmFeature.Streaming, LlmFeature.ImageInput, LlmFeature.ToolCalling, LlmFeature.JsonOutput, LlmFeature.Reasoning), setOf(LlmFeature.PromptCaching, LlmFeature.RemoteState))
 
-    override fun rebuildLaneB(rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB = GeminiLaneB(rootRevision.id, nodes.lastOrNull()?.id, config.laneBKey(shape), geminiRoot(rootRevision.root), geminiContents(nodes), sessionBlackboard.onlyPrefixed("gemini."))
+    override fun rebuildLaneB(rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB {
+        val projection = geminiProjection(nodes)
+        return GeminiLaneB(rootRevision.id, nodes.lastOrNull()?.id, config.laneBKey(shape), geminiRoot(rootRevision.root), projection.contents, projection.textualizedToolIds, sessionBlackboard.onlyPrefixed("gemini."))
+    }
 
     override fun debugLaneB(laneB: ProviderLaneB?) = laneB?.let { debugLaneB(it as? GeminiLaneB ?: return@let providerLaneBDebug("GeminiLaneB(wrong type)", it)) } ?: "GeminiLaneB(null)"
 
@@ -78,6 +80,7 @@ class GeminiBackend(private val config: GeminiBackendConfig) : HttpProviderBacke
         appendLine("  root.systemInstruction=${lane.root.systemInstruction}")
         appendLine("  root.tools=${lane.root.tools}")
         appendLine("  root.toolConfig=${lane.root.toolConfig}")
+        appendLine("  textualizedToolIds=${lane.textualizedToolIds}")
         appendLine("  contents:")
         lane.contents.forEachIndexed { index, content -> appendLine("    [$index] $content") }
     }
@@ -100,7 +103,8 @@ class GeminiBackend(private val config: GeminiBackendConfig) : HttpProviderBacke
 
     private fun commit(turn: ProviderTurn<GeminiLaneB>, result: TurnResult): ProviderTurnCommit<GeminiLaneB> {
         val lane = turn.laneB
-        val next = lane.copy(anchorNodeId = turn.resultNodeId, contents = lane.contents + geminiRequestContents(turn.requestNode.request) + geminiModelContent(result), blackboard = lane.blackboard.withAll(result.blackboard.onlyPrefixed("gemini."))).tidyAfterAppend()
+        val textualizedToolIds = lane.textualizedToolIds.toMutableSet()
+        val next = lane.copy(anchorNodeId = turn.resultNodeId, contents = lane.contents + geminiRequestContents(turn.requestNode.request, textualizedToolIds) + geminiModelContent(result, textualizedToolIds), textualizedToolIds = textualizedToolIds, blackboard = lane.blackboard.withAll(result.blackboard.onlyPrefixed("gemini."))).tidyAfterAppend()
         return ProviderTurnCommit(next, result)
     }
 }
@@ -113,19 +117,28 @@ private fun geminiRoot(root: SessionRoot) = GeminiRoot(
 
 private fun geminiContents(lane: GeminiLaneB, request: TurnRequest) = buildJsonArray {
     lane.contents.forEach { add(it) }
-    geminiRequestContents(request).forEach { add(it) }
+    geminiRequestContents(request, lane.textualizedToolIds.toMutableSet()).forEach { add(it) }
 }
 
-private fun geminiContents(nodes: List<SessionNode>) = buildList {
-    nodes.forEach { node ->
-        when (node) {
-            is TurnRequestNode -> addAll(geminiRequestContents(node.request))
-            is TurnResultNode -> add(geminiModelContent(node.result))
+private data class GeminiProjection(val contents: List<JsonObject>, val textualizedToolIds: Set<String>)
+
+// TIPS：进行转译+转译中有顺手处理
+private fun geminiProjection(nodes: List<SessionNode>): GeminiProjection {
+    val textualizedToolIds = mutableSetOf<String>() // 有一些外家工具调用，需要乔装处理
+
+    val contents = buildList {
+        nodes.forEach { node ->
+            when (node) {
+                is TurnRequestNode -> addAll(geminiRequestContents(node.request, textualizedToolIds))
+                is TurnResultNode -> add(geminiModelContent(node.result, textualizedToolIds))
+            }
         }
     }
+
+    return GeminiProjection(contents, textualizedToolIds)
 }
 
-private fun geminiRequestContents(request: TurnRequest) = buildList {
+private fun geminiRequestContents(request: TurnRequest, textualizedToolIds: MutableSet<String> = mutableSetOf()) = buildList {
     request.items.forEach { item ->
         when (item) {
             is TurnInputItem.Content -> add(buildJsonObject {
@@ -133,50 +146,119 @@ private fun geminiRequestContents(request: TurnRequest) = buildList {
                 put("parts", geminiParts(item.parts))
             })
 
-            is TurnInputItem.ToolResult -> add(buildJsonObject {
-                put("role", "user")
-                put("parts", buildJsonArray {
-                    add(buildJsonObject {
-                        put("functionResponse", buildJsonObject {
-                            item.name?.let { put("name", it) }
-                            put("response", buildJsonObject {
-                                put("toolCallId", item.toolCallId)
-                                put("result", item.parts.plainText())
-                                put("isError", item.isError)
-                            })
-                        })
-                    })
-                })
-            })
+            is TurnInputItem.ToolResult -> if (item.toolCallId in textualizedToolIds) add(geminiUserTextContent(item.previousToolResultText())) else add(geminiFunctionResponseContent(item))
         }
     }
 }
 
-private fun geminiModelContent(result: TurnResult) = buildJsonObject {
+private fun geminiModelContent(result: TurnResult, textualizedToolIds: MutableSet<String> = mutableSetOf()): JsonObject {
+    if (!result.hasGeminiNativeToolChain() && result.hasToolCalls()) {
+        result.items.filterIsInstance<TurnItem.ToolCall>().forEach { textualizedToolIds += it.id }
+        // Gemini 对缺 thoughtSignature 的工具链要求很硬；外家/无签名未闭合波整体乔装为普通文本。
+        return geminiModelTextContent(result.previousAssistantText() ?: "")
+    }
+
+    return buildJsonObject {
+        put("role", "model")
+        put("parts", buildJsonArray {
+            result.items.forEach { item ->
+                when (item) {
+                    is TurnItem.Content -> add(buildJsonObject { put("text", item.asText()) })
+                    is TurnItem.Reasoning -> if (result.isFrom(ProviderShape.Gemini)) add(item.toGeminiThoughtPart()) else item.previousThoughtText()?.let { add(buildJsonObject { put("text", it) }) }
+                    is TurnItem.ToolCall -> add(buildJsonObject {
+                        item.blackboard.string("gemini.thought_signature")?.let { put("thoughtSignature", it) }
+                        put("functionCall", buildJsonObject {
+                            put("name", item.name)
+                            put("args", item.arguments)
+                            if (!item.id.startsWith("gemini:")) put("id", item.id)
+                        })
+                    })
+
+                    is TurnItem.Refusal -> item.text?.let { add(buildJsonObject { put("text", it) }) }
+                }
+            }
+        })
+    }
+}
+
+private fun GeminiLaneB.tidyAfterAppend(): GeminiLaneB {
+    val tidied = contents.tidyLatestGeminiWave()
+    if (tidied == contents) return this
+    return copy(contents = tidied, textualizedToolIds = textualizedToolIds.filterTo(mutableSetOf()) { id -> tidied.any { it.containsGeminiTextualizedToolId(id) } })
+}
+
+private data class GeminiWaveRange(val start: Int, val endExclusive: Int)
+
+private fun List<JsonObject>.tidyLatestGeminiWave(): List<JsonObject> {
+    val range = latestGeminiWaveRange() ?: return this
+    val tidied = subList(range.start, range.endExclusive).tidiedGeminiWave()
+    if (tidied == subList(range.start, range.endExclusive)) return this
+    return take(range.start) + tidied + drop(range.endExclusive)
+}
+
+private fun List<JsonObject>.latestGeminiWaveRange(): GeminiWaveRange? {
+    if (lastOrNull()?.isGeminiFinalModelContent() != true) return null
+    var start = indexOfLast { it.string("role") == "user" && !it.hasGeminiFunctionResponse() && !it.hasGeminiTextualizedToolResult() }.takeIf { it >= 0 } ?: return null
+    while (start > 0 && this[start - 1].string("role") == "user" && !this[start - 1].hasGeminiFunctionResponse() && !this[start - 1].hasGeminiTextualizedToolResult()) start--
+    return GeminiWaveRange(start, size)
+}
+
+private fun List<JsonObject>.tidiedGeminiWave(): List<JsonObject> {
+    val promptCount = takeWhile { it.string("role") == "user" && !it.hasGeminiFunctionResponse() && !it.hasGeminiTextualizedToolResult() }.size
+    if (promptCount == 0) return this
+    val final = lastOrNull { it.isGeminiFinalModelContent() } ?: return this
+    return take(promptCount) + final.geminiFinalOnly()
+}
+
+private fun JsonObject.isGeminiFinalModelContent() = string("role") == "model" && !hasGeminiFunctionCall() && hasGeminiVisibleText()
+
+private fun JsonObject.hasGeminiFunctionCall() = this["parts"]?.jsonArrayOrNull().orEmpty().any { it.jsonObjectOrNull()?.containsKey("functionCall") == true }
+
+private fun JsonObject.hasGeminiFunctionResponse() = this["parts"]?.jsonArrayOrNull().orEmpty().any { it.jsonObjectOrNull()?.containsKey("functionResponse") == true }
+
+private fun JsonObject.hasGeminiTextualizedToolResult() = this["parts"]?.jsonArrayOrNull().orEmpty().any { it.jsonObjectOrNull()?.string("text")?.startsWith("[tool result]") == true }
+
+private fun JsonObject.containsGeminiTextualizedToolId(id: String) = this["parts"]?.jsonArrayOrNull().orEmpty().any { it.jsonObjectOrNull()?.string("text")?.contains("id=$id") == true }
+
+private fun JsonObject.hasGeminiVisibleText() = this["parts"]?.jsonArrayOrNull().orEmpty().any { part ->
+    val obj = part.jsonObjectOrNull() ?: return@any false
+    obj.boolean("thought") != true && obj.string("text")?.isNotBlank() == true
+}
+
+private fun JsonObject.geminiFinalOnly() = buildJsonObject {
     put("role", "model")
     put("parts", buildJsonArray {
-        result.items.forEach { item ->
-            when (item) {
-                is TurnItem.Content -> add(buildJsonObject { put("text", item.asText()) })
-                is TurnItem.Reasoning -> add(item.toGeminiThoughtPart())
-                is TurnItem.ToolCall -> add(buildJsonObject {
-                    item.blackboard.string("gemini.thought_signature")?.let { put("thoughtSignature", it) }
-                    put("functionCall", buildJsonObject {
-                        put("name", item.name)
-                        put("args", item.arguments)
-                        if (!item.id.startsWith("gemini:")) put("id", item.id)
-                    })
-                })
-
-                is TurnItem.Refusal -> item.text?.let { add(buildJsonObject { put("text", it) }) }
-            }
+        this@geminiFinalOnly["parts"]?.jsonArrayOrNull().orEmpty().forEach { part ->
+            val obj = part.jsonObjectOrNull() ?: return@forEach
+            if (obj.boolean("thought") != true && obj.string("text")?.isNotBlank() == true) add(buildJsonObject { put("text", obj.string("text").orEmpty()) })
         }
     })
 }
 
-private fun GeminiLaneB.tidyAfterAppend(): GeminiLaneB {
-    // 未来可在这里插入小整理：看尾部是否闭合成一波（Prompt-Answer），薄掉一波里不必重发的思考/Tool
-    return this
+private fun geminiFunctionResponseContent(item: TurnInputItem.ToolResult) = buildJsonObject {
+    put("role", "user")
+    put("parts", buildJsonArray {
+        add(buildJsonObject {
+            put("functionResponse", buildJsonObject {
+                item.name?.let { put("name", it) }
+                put("response", buildJsonObject {
+                    put("toolCallId", item.toolCallId)
+                    put("result", item.parts.plainText())
+                    put("isError", item.isError)
+                })
+            })
+        })
+    })
+}
+
+private fun geminiUserTextContent(text: String) = buildJsonObject {
+    put("role", "user")
+    put("parts", buildJsonArray { add(buildJsonObject { put("text", text) }) })
+}
+
+private fun geminiModelTextContent(text: String) = buildJsonObject {
+    put("role", "model")
+    put("parts", buildJsonArray { add(buildJsonObject { put("text", text) }) })
 }
 
 private fun geminiParts(parts: List<ContentPart>) = buildJsonArray {

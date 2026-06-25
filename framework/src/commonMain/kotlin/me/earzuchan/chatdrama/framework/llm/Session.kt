@@ -181,7 +181,7 @@ class LlmSession private constructor(private val sessionTag: String, private val
         val key = config.laneBKey(backend.shape)
 
         if (current != null && current.shape == backend.shape && current.rootRevisionId == activeRootId && current.anchorNodeId == activeNodeId && current.configKey == key) return current
-        return backend.rebuildLaneB(activeRoot, path, config, blackboardOf(path)).also { laneB = it }
+        return backend.rebuildLaneB(activeRoot, path.toThinPath(), config, blackboardOf(path)).also { laneB = it }
     }
 
     private fun blackboardOf(path: List<SessionNode>, extraNode: SessionNode? = null): LlmBlackboard {
@@ -199,6 +199,7 @@ class LlmSession private constructor(private val sessionTag: String, private val
     }
 }
 
+// CHECK：传入Shape干嘛，是否多余
 internal fun EffectiveLlmCallConfig.laneBKey(shape: ProviderShape) = ProviderLaneBConfigKey(model, reasoning, cache, output, providerOptions[shape] ?: emptyJsonObject())
 
 internal fun <B : ProviderLaneB> ProviderTurn<*>.typedTurn(laneName: String, cast: (ProviderLaneB) -> B?) = ProviderTurn(cast(laneB) ?: error("LaneB is not $laneName: ${laneB::class.simpleName}"), requestNode, resultNodeId, config, sessionBlackboard)

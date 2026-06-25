@@ -14,7 +14,6 @@ private data class ClaudeLaneB(override val rootRevisionId: LlmNodeId, override 
     override val shape = ProviderShape.Claude
 }
 
-// TODO：小压缩
 class ClaudeBackend(private val config: ClaudeBackendConfig) : HttpProviderBackend() {
     override val shape = ProviderShape.Claude
     override val capabilities = LlmCapabilities(setOf(LlmFeature.Content, LlmFeature.Streaming, LlmFeature.ImageInput, LlmFeature.ToolCalling, LlmFeature.Reasoning), setOf(LlmFeature.JsonOutput, LlmFeature.PromptCaching))
@@ -137,6 +136,7 @@ private fun claudeMessages(lane: ClaudeLaneB, request: TurnRequest) = buildJsonA
     claudeRequestMessages(request).forEach { add(it) }
 }
 
+// TIPS：进行转译+转译中有顺手处理
 private fun claudeMessages(nodes: List<SessionNode>) = buildList {
     nodes.forEach { node ->
         when (node) {
@@ -172,6 +172,8 @@ private fun claudeRequestMessages(request: TurnRequest) = buildList {
 private fun claudeAssistantMessage(result: TurnResult) = buildJsonObject {
     put("role", "assistant")
     put("content", buildJsonArray {
+        val nativeThinking = result.hasClaudeNativeThinking()
+
         result.items.forEach { item ->
             when (item) {
                 is TurnItem.Content -> add(buildJsonObject {
@@ -179,7 +181,12 @@ private fun claudeAssistantMessage(result: TurnResult) = buildJsonObject {
                     put("text", item.asText())
                 })
 
-                is TurnItem.Reasoning -> add(item.toClaudeThinkingBlock())
+                // TIPS：Claude 的 thinking signature 不可伪造；外家/无签名思考作为 text prefix 喂给模型
+                is TurnItem.Reasoning -> if (nativeThinking) add(item.toClaudeThinkingBlock()) else item.previousThoughtText()?.let { add(buildJsonObject {
+                    put("type", "text")
+                    put("text", it)
+                }) }
+
                 is TurnItem.ToolCall -> add(buildJsonObject {
                     put("type", "tool_use")
                     put("id", item.id)
@@ -197,8 +204,51 @@ private fun claudeAssistantMessage(result: TurnResult) = buildJsonObject {
 }
 
 private fun ClaudeLaneB.tidyAfterAppend(): ClaudeLaneB {
-    // 未来可在这里插入小整理：看尾部是否闭合成一波（Prompt-Answer），薄掉一波里不必重发的思考/Tool
-    return this
+    return copy(messages = messages.tidyLatestClaudeWave())
+}
+
+private data class ClaudeWaveRange(val start: Int, val endExclusive: Int)
+
+private fun List<JsonObject>.tidyLatestClaudeWave(): List<JsonObject> {
+    val range = latestClaudeWaveRange() ?: return this
+    val tidied = subList(range.start, range.endExclusive).tidiedClaudeWave()
+    if (tidied == subList(range.start, range.endExclusive)) return this
+    return take(range.start) + tidied + drop(range.endExclusive)
+}
+
+private fun List<JsonObject>.latestClaudeWaveRange(): ClaudeWaveRange? {
+    if (lastOrNull()?.isClaudeFinalAssistant() != true) return null
+    var start = indexOfLast { it.string("role") == "user" && !it.hasClaudeToolResult() }.takeIf { it >= 0 } ?: return null
+    while (start > 0 && this[start - 1].string("role") == "user" && !this[start - 1].hasClaudeToolResult()) start--
+    return ClaudeWaveRange(start, size)
+}
+
+private fun List<JsonObject>.tidiedClaudeWave(): List<JsonObject> {
+    val promptCount = takeWhile { it.string("role") == "user" && !it.hasClaudeToolResult() }.size
+    if (promptCount == 0) return this
+    val final = lastOrNull { it.isClaudeFinalAssistant() } ?: return this
+    return take(promptCount) + final.claudeFinalOnly()
+}
+
+private fun JsonObject.isClaudeFinalAssistant() = string("role") == "assistant" && !hasClaudeToolUse() && hasClaudeVisibleText()
+
+private fun JsonObject.hasClaudeToolUse() = this["content"]?.jsonArrayOrNull().orEmpty().any { it.jsonObjectOrNull()?.string("type") == "tool_use" }
+
+private fun JsonObject.hasClaudeToolResult() = this["content"]?.jsonArrayOrNull().orEmpty().any { it.jsonObjectOrNull()?.string("type") == "tool_result" }
+
+private fun JsonObject.hasClaudeVisibleText() = this["content"]?.jsonArrayOrNull().orEmpty().any { it.jsonObjectOrNull()?.let { block -> block.string("type") == "text" && block.string("text")?.isNotBlank() == true } == true }
+
+private fun JsonObject.claudeFinalOnly() = buildJsonObject {
+    put("role", "assistant")
+    put("content", buildJsonArray {
+        this@claudeFinalOnly["content"]?.jsonArrayOrNull().orEmpty().forEach { blockElement ->
+            val block = blockElement.jsonObjectOrNull() ?: return@forEach
+            if (block.string("type") == "text" && block.string("text")?.isNotBlank() == true) add(buildJsonObject {
+                put("type", "text")
+                put("text", block.string("text").orEmpty())
+            })
+        }
+    })
 }
 
 private fun claudeSystem(parts: List<ContentPart>) = buildJsonArray { parts.forEach { add(claudeContentBlock(it)) } }
@@ -291,6 +341,7 @@ private fun OutputContract.jsonInstruction() = when (this) {
     is OutputContract.JsonSchema -> "Return only valid JSON matching this schema. Do not include markdown fences or commentary.\n$schema"
 }
 
+// TODO：这是官方的吗？回头核对一下
 private fun ReasoningLevel.defaultClaudeThinkingBudget() = when (this) {
     ReasoningLevel.Off -> 0
     ReasoningLevel.Minimal -> 1024

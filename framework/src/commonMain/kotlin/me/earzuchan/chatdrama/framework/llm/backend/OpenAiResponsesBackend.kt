@@ -21,7 +21,7 @@ class OpenAiResponsesBackend(private val config: OpenAiResponsesBackendConfig) :
     override val shape = ProviderShape.OpenAiResponses
     override val capabilities = LlmCapabilities(setOf(LlmFeature.Content, LlmFeature.Streaming, LlmFeature.ImageInput, LlmFeature.ToolCalling, LlmFeature.JsonOutput, LlmFeature.Reasoning), setOf(LlmFeature.PromptCaching, LlmFeature.RemoteState))
 
-    override fun rebuildLaneB(rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB = OpenAiResponsesLaneB(rootRevision.id, nodes.lastOrNull()?.id, config.laneBKey(shape), openAiResponsesRoot(rootRevision.root), OpenAiResponsesContext.Stateless(openAiResponsesInput(nodes)), sessionBlackboard.openAiResponsesLaneBlackboard()).tidyAfterRebuild()
+    override fun rebuildLaneB(rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB = OpenAiResponsesLaneB(rootRevision.id, nodes.lastOrNull()?.id, config.laneBKey(shape), openAiResponsesRoot(rootRevision.root), OpenAiResponsesContext.Stateless(openAiResponsesInput(nodes)), sessionBlackboard.openAiResponsesLaneBlackboard())
 
     override suspend fun breakState(laneB: ProviderLaneB, rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB {
         val lane = laneB as? OpenAiResponsesLaneB ?: return laneB
@@ -196,13 +196,13 @@ class OpenAiResponsesBackend(private val config: OpenAiResponsesBackendConfig) :
 
     private fun OpenAiResponsesLaneB.breakState(rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard) = when (context) {
         is OpenAiResponsesContext.Stateless -> copy(blackboard = blackboard.without("openai.responses.response_id"))
-        is OpenAiResponsesContext.StatefulByPreviousId -> OpenAiResponsesLaneB(rootRevision.id, nodes.lastOrNull()?.id, config.laneBKey(shape), openAiResponsesRoot(rootRevision.root), OpenAiResponsesContext.Stateless(openAiResponsesInput(nodes)), sessionBlackboard.openAiResponsesLaneBlackboard()).tidyAfterRebuild()
+        is OpenAiResponsesContext.StatefulByPreviousId -> OpenAiResponsesLaneB(rootRevision.id, nodes.lastOrNull()?.id, config.laneBKey(shape), openAiResponsesRoot(rootRevision.root), OpenAiResponsesContext.Stateless(openAiResponsesInput(nodes)), sessionBlackboard.openAiResponsesLaneBlackboard())
     }
 
     // 滚回“无状态”去
     private fun OpenAiResponsesLaneB.fallbackFromPreviousResponseUnsupported(): OpenAiResponsesLaneB {
         val context = context as? OpenAiResponsesContext.StatefulByPreviousId ?: return this
-        return copy(context = OpenAiResponsesContext.Stateless(context.shadowInput), blackboard = blackboard.with(OPENAI_RESPONSES_PREVIOUS_RESPONSE_UNSUPPORTED, "true").without("openai.responses.response_id")).tidyAfterRebuild()
+        return copy(context = OpenAiResponsesContext.Stateless(context.shadowInput), blackboard = blackboard.with(OPENAI_RESPONSES_PREVIOUS_RESPONSE_UNSUPPORTED, "true").without("openai.responses.response_id"))
     }
 }
 
@@ -216,6 +216,7 @@ private fun openAiResponsesInput(input: List<JsonObject>, request: TurnRequest) 
     openAiResponsesRequestInput(request).forEach { add(it) }
 }
 
+// TIPS：进行转译+转译中有顺手处理
 private fun openAiResponsesInput(nodes: List<SessionNode>) = buildList {
     nodes.forEach { node ->
         when (node) {
@@ -242,11 +243,18 @@ private fun openAiResponsesRequestInput(request: TurnRequest) = buildList {
     }
 }
 
+// CHECK：这里会不会有合流问题？如果是原生收到Result，为什么要转TurnResult再回转？本应只面向转译！
 private fun openAiResponsesResultInput(result: TurnResult): List<JsonObject> {
     val rawOutput = result.trace.raw?.jsonObjectOrNull()?.get("output")?.jsonArrayOrNull()
     if (rawOutput != null) return rawOutput.mapNotNull { it.jsonObjectOrNull() }
 
     return buildList {
+        // Responses 对外家 reasoning item 虽能收，但实验显示模型可能接不住；外家思考乔装为普通 assistant text。
+        if (!result.isFrom(ProviderShape.OpenAiResponses)) result.previousReasoningText()?.let { add(buildJsonObject {
+            put("role", "assistant")
+            put("content", it)
+        }) }
+
         result.items.forEach { item ->
             when (item) {
                 is TurnItem.Content -> add(buildJsonObject {
@@ -261,7 +269,18 @@ private fun openAiResponsesResultInput(result: TurnResult): List<JsonObject> {
                     put("arguments", item.arguments.toString())
                 })
 
-                is TurnItem.Reasoning, is TurnItem.Refusal -> Unit
+                is TurnItem.Reasoning -> if (result.isFrom(ProviderShape.OpenAiResponses)) add(buildJsonObject {
+                    put("type", "reasoning")
+                    item.text?.let { put("summary", buildJsonArray { add(buildJsonObject {
+                        put("type", "summary_text")
+                        put("text", it)
+                    }) }) }
+                })
+
+                is TurnItem.Refusal -> item.text?.let { add(buildJsonObject {
+                    put("role", "assistant")
+                    put("content", it)
+                }) }
             }
         }
     }
@@ -270,66 +289,14 @@ private fun openAiResponsesResultInput(result: TurnResult): List<JsonObject> {
 private fun openAiResponsesBlackboard(raw: JsonObject) = raw.string("id")?.let { LlmBlackboard.Empty.with("openai.responses.compaction_id", it) } ?: LlmBlackboard.Empty
 
 // 这俩：如果之前是被官方压缩的，则不解盘
-private fun OpenAiResponsesLaneB.tidyAfterAppend(): OpenAiResponsesLaneB {
-    val context = context
-    if (context !is OpenAiResponsesContext.Stateless || context.officialCompaction) return this
-    return copy(context = context.copy(input = context.input.tidyLatestOpenAiResponsesWave()))
-}
-
-private fun OpenAiResponsesLaneB.tidyAfterRebuild(): OpenAiResponsesLaneB {
-    val context = context
-    if (context !is OpenAiResponsesContext.Stateless || context.officialCompaction) return this
-    return copy(context = context.copy(input = context.input.tidyOpenAiResponsesWaves()))
+private fun OpenAiResponsesLaneB.tidyAfterAppend() = when (val context = context) {
+    is OpenAiResponsesContext.Stateless -> if (context.officialCompaction) this else copy(context = context.copy(input = context.input.tidyLatestOpenAiResponsesWave()))
+    is OpenAiResponsesContext.StatefulByPreviousId -> copy(context = context.copy(shadowInput = context.shadowInput.tidyLatestOpenAiResponsesWave()))
 }
 
 // 小压缩 Start
 
 private data class OpenAiResponsesWaveRange(val start: Int, val endExclusive: Int)
-
-// 将其中的元素按波聚合，对每个波进行整理，最后返回整理后的完整列表
-private fun List<JsonObject>.tidyOpenAiResponsesWaves(): List<JsonObject> {
-    val ranges = openAiResponsesWaveRanges()
-    if (ranges.isEmpty()) return this
-
-    val result = mutableListOf<JsonObject>()
-    var cursor = 0
-
-    ranges.forEach { range ->
-        result += subList(cursor, range.start)
-        result += tidiedOpenAiResponsesWave(range)
-        cursor = range.endExclusive
-    }
-
-    result += drop(cursor)
-    return if (result == this) this else result
-}
-
-private fun List<JsonObject>.openAiResponsesWaveRanges(): List<OpenAiResponsesWaveRange> {
-    val ranges = mutableListOf<OpenAiResponsesWaveRange>()
-    var start: Int? = null
-    var hasNonPrompt = false
-
-    fun flush(endExclusive: Int) {
-        start?.let { ranges += OpenAiResponsesWaveRange(it, endExclusive) }
-        start = null
-        hasNonPrompt = false
-    }
-
-    forEachIndexed { index, item ->
-        if (item.isOpenAiResponsesCompaction()) {
-            flush(index)
-            return@forEachIndexed
-        }
-
-        if (item.isOpenAiResponsesPrompt()) {
-            if (hasNonPrompt) flush(index)
-            if (start == null) start = index
-        } else if (start != null) hasNonPrompt = true
-    }
-
-    flush(size)
-    return ranges
-}
 
 private fun List<JsonObject>.tidyLatestOpenAiResponsesWave(): List<JsonObject> {
     val range = latestOpenAiResponsesWaveRange() ?: return this

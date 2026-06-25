@@ -122,6 +122,7 @@ private fun openAiLegacyMessages(lane: OpenAiLegacyLaneB, request: TurnRequest) 
     openAiLegacyRequestMessages(request).forEach { add(it) }
 }
 
+// TIPS：进行转译+转译中有顺手处理。OAI Legacy 需处理的较少
 private fun openAiLegacyMessages(nodes: List<SessionNode>) = buildList {
     nodes.forEach { node ->
         when (node) {
@@ -151,6 +152,7 @@ private fun openAiLegacyRequestMessages(request: TurnRequest) = buildList {
 
 private fun openAiLegacyAssistantMessage(result: TurnResult) = buildJsonObject {
     put("role", "assistant")
+    val reasoning = result.items.filterIsInstance<TurnItem.Reasoning>().mapNotNull { it.text }.joinToString("\n").takeIf { it.isNotBlank() }
     val text = result.items.mapNotNull {
         when (it) {
             is TurnItem.Content -> (it.body as? OutputBody.Text)?.text ?: (it.body as? OutputBody.Json)?.rawText ?: it.body.toString()
@@ -160,6 +162,9 @@ private fun openAiLegacyAssistantMessage(result: TurnResult) = buildJsonObject {
     }.joinToString("\n").ifBlank { null }
     val toolCalls = result.items.filterIsInstance<TurnItem.ToolCall>()
     if (text != null) put("content", text) else put("content", JsonNull)
+
+    // Legacy/DeepSeek 对外家思考也最宽松，直接按 reasoning_content 回填就完事儿，保证工具波不断线
+    reasoning?.let { put("reasoning_content", it) }
     if (toolCalls.isNotEmpty()) put("tool_calls", buildJsonArray {
         toolCalls.forEach { toolCall ->
             add(buildJsonObject {
@@ -175,8 +180,39 @@ private fun openAiLegacyAssistantMessage(result: TurnResult) = buildJsonObject {
 }
 
 private fun OpenAiLegacyLaneB.tidyAfterAppend(): OpenAiLegacyLaneB {
-    // 未来可在这里插入小整理：看尾部是否闭合成一波（Prompt-Answer），薄掉一波里不必重发的思考/Tool
-    return this
+    return copy(messages = messages.tidyLatestOpenAiLegacyWave())
+}
+
+private data class OpenAiLegacyWaveRange(val start: Int, val endExclusive: Int)
+
+private fun List<JsonObject>.tidyLatestOpenAiLegacyWave(): List<JsonObject> {
+    val range = latestOpenAiLegacyWaveRange() ?: return this
+    val tidied = subList(range.start, range.endExclusive).tidiedOpenAiLegacyWave()
+    if (tidied == subList(range.start, range.endExclusive)) return this
+    return take(range.start) + tidied + drop(range.endExclusive)
+}
+
+private fun List<JsonObject>.latestOpenAiLegacyWaveRange(): OpenAiLegacyWaveRange? {
+    if (lastOrNull()?.isOpenAiLegacyFinalAssistant() != true) return null
+    var start = indexOfLast { it.string("role") == "user" }.takeIf { it >= 0 } ?: return null
+    while (start > 0 && this[start - 1].string("role") == "user") start--
+    return OpenAiLegacyWaveRange(start, size)
+}
+
+private fun List<JsonObject>.tidiedOpenAiLegacyWave(): List<JsonObject> {
+    val promptCount = takeWhile { it.string("role") == "user" }.size
+    if (promptCount == 0) return this
+    val final = lastOrNull { it.isOpenAiLegacyFinalAssistant() } ?: return this
+    return take(promptCount) + final.openAiLegacyFinalOnly()
+}
+
+private fun JsonObject.isOpenAiLegacyFinalAssistant() = string("role") == "assistant" && !containsKey("tool_calls") && hasOpenAiLegacyVisibleContent()
+
+private fun JsonObject.hasOpenAiLegacyVisibleContent() = string("content")?.isNotBlank() == true
+
+private fun JsonObject.openAiLegacyFinalOnly() = buildJsonObject {
+    put("role", "assistant")
+    string("content")?.let { put("content", it) }
 }
 
 private fun openAiLegacyInputContent(parts: List<ContentPart>): JsonElement {
