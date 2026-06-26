@@ -15,13 +15,10 @@ interface ProviderBackend {
     val shape: ProviderShape
     val capabilities: LlmCapabilities
 
-    // Rebuild出来的爆窗怎么办？没事，发送前应该会过maybeCompact！
+    // TIPS：Rebuild出来的爆窗没事：发送前会过maybeCompact
     fun rebuildLaneB(rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB
 
     suspend fun request(turn: ProviderTurn<ProviderLaneB>, mode: RequestMode): ProviderTurnCommit<ProviderLaneB>
-
-    // 或许要删除
-    suspend fun breakState(laneB: ProviderLaneB, rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB = laneB
 
     suspend fun compact(laneB: ProviderLaneB, rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB {
         // TODO：未来给各大压缩：手动触发，压 laneB。这里是默认实现，可被重写
@@ -59,7 +56,7 @@ abstract class HttpProviderBackend : ProviderBackend, KoinComponent {
         return parseJsonResponse(response)
     }
 
-    protected suspend fun postSse(url: String, headers: Map<String, String>, body: JsonObject, onEvent: suspend (event: String?, data: String) -> Unit): Unit {
+    protected suspend fun postSse(url: String, headers: Map<String, String>, body: JsonObject, onEvent: suspend (event: String?, data: String) -> Unit) {
         val bodyText = json.encodeToString(JsonObject.serializer(), body)
         printLlmRequestBody(url, bodyText)
 

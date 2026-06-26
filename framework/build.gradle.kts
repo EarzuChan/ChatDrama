@@ -32,7 +32,7 @@ kotlin {
         }
 
         jvmMain.dependencies {
-            implementation(libs.ktor.client.okhttp)
+            implementation(libs.ktor.client.apache5)
         }
 
         commonTest.dependencies {

@@ -1,19 +1,15 @@
 package me.earzuchan.chatdrama.framework.di
 
 import io.ktor.client.*
-import io.ktor.client.engine.okhttp.*
+import io.ktor.client.engine.apache5.*
 import org.koin.dsl.module
-import java.util.concurrent.TimeUnit
 
 actual val frameworkPlatformModule = module {
-    single<HttpClient> { HttpClient(OkHttp) {
+    single<HttpClient> { HttpClient(Apache5) {
         engine {
-            config {
-                connectTimeout(30, TimeUnit.SECONDS)
-                readTimeout(120, TimeUnit.SECONDS)
-                writeTimeout(120, TimeUnit.SECONDS)
-                callTimeout(120, TimeUnit.SECONDS)
-            }
+            socketTimeout = 120_000
+            connectTimeout = 30_000
+            connectionRequestTimeout = 30_000
         }
     } }
 }

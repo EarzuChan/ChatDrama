@@ -89,13 +89,6 @@ class LlmSession private constructor(private val sessionTag: String, private val
         laneB = backend.compact(ensureLaneB(effective, path), activeRoot, path, effective, blackboardOf(path))
     }
 
-    // TODO：可能要删掉。状态是系统自动维护或许更美丽？
-    suspend fun breakProviderState(config: LlmCallConfig = LlmCallConfig()) {
-        val effective = resolveConfig(config)
-        val path = activePath()
-        laneB = backend.breakState(ensureLaneB(effective, path), activeRoot, path, effective, blackboardOf(path))
-    }
-
     override fun activePath(): List<SessionNode> {
         val path = mutableListOf<SessionNode>()
         var current = activeNodeId

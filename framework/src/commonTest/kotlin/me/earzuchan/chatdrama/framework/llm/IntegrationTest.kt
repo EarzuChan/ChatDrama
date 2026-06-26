@@ -15,8 +15,8 @@ const val VANYO_BASE_URL = "https://cn.vanyospace.com"
 const val VANYO_MODEL_GPT5_5 = "gpt-5.5"
 const val DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 const val DEEPSEEK_MODEL_V4_PRO = "deepseek-v4-pro"
-const val OPENROUTER_BASE_URL = "https://openrouter.ai/api"
-const val OPENROUTER_MODEL_CLAUDE_SONNET_4_6 = "anthropic/claude-sonnet-4.6"
+const val OPUSRELAY_BASE_URL = "https://opusrelay.com"
+const val OPUSRELAY_MODEL_CLAUDE_CLAUDE_4_8 = "claude-opus-4-8"
 const val GEMINI_MODEL_3_FLASH = "gemini-3-flash-preview"
 
 private fun log(tag: String, any: Any) = println("[$tag] $any")
@@ -29,10 +29,10 @@ class LlmApiIntegrationTest {
 
     @Test
     fun tempDemo() = runTest {
-        val (backend, model) = OpenAiLegacyBackend(OpenAiLegacyBackendConfig(DEEPSEEK_KEY, DEEPSEEK_BASE_URL)) to DEEPSEEK_MODEL_V4_PRO
-        // val (backend, model) = OpenAiResponsesBackend(OpenAiResponsesBackendConfig(VANYO_OPENAI_KEY, "$VANYO_BASE_URL/v1")) to VANYO_MODEL_GPT5_5
+        // val (backend, model) = OpenAiLegacyBackend(OpenAiLegacyBackendConfig(DEEPSEEK_KEY, DEEPSEEK_BASE_URL)) to DEEPSEEK_MODEL_V4_PRO
+        val (backend, model) = OpenAiResponsesBackend(OpenAiResponsesBackendConfig(VANYO_OPENAI_KEY, "$VANYO_BASE_URL/v1")) to VANYO_MODEL_GPT5_5
         // val (backend, model) = GeminiBackend(GeminiBackendConfig(GEMINI_KEY)) to GEMINI_MODEL_3_FLASH
-        // val (backend, model) = ClaudeBackend(ClaudeBackendConfig(OPENROUTER_KEY,OPENROUTER_BASE_URL)) to OPENROUTER_MODEL_CLAUDE_SONNET_4_6
+        // val (backend, model) = ClaudeBackend(ClaudeBackendConfig(OPUSRELAY_KEY, OPUSRELAY_BASE_URL)) to OPUSRELAY_MODEL_CLAUDE_CLAUDE_4_8
 
         val session = LlmSession(
             backend = backend,
@@ -76,7 +76,7 @@ class LlmApiIntegrationTest {
         val (backend1, model1) = OpenAiLegacyBackend(OpenAiLegacyBackendConfig(DEEPSEEK_KEY, DEEPSEEK_BASE_URL)) to DEEPSEEK_MODEL_V4_PRO
         val (backend2, model2) = OpenAiResponsesBackend(OpenAiResponsesBackendConfig(VANYO_OPENAI_KEY, "$VANYO_BASE_URL/v1")) to VANYO_MODEL_GPT5_5
         val (backend3, model3) = GeminiBackend(GeminiBackendConfig(GEMINI_KEY)) to GEMINI_MODEL_3_FLASH
-        val (backend4, model4) = ClaudeBackend(ClaudeBackendConfig(OPENROUTER_KEY,OPENROUTER_BASE_URL)) to OPENROUTER_MODEL_CLAUDE_SONNET_4_6
+        val (backend4, model4) = ClaudeBackend(ClaudeBackendConfig(OPUSRELAY_KEY, OPUSRELAY_BASE_URL)) to OPUSRELAY_MODEL_CLAUDE_CLAUDE_4_8
 
         val session = LlmSession(
             backend = backend1,
