@@ -28,7 +28,7 @@ interface LaneA {
 }
 
 interface ProviderLaneB {
-    val shape: ProviderShape
+    val shape: ProviderShape // TODO：没人用到这个的Shape，可以未来删掉
     val rootRevisionId: LlmNodeId
     val anchorNodeId: LlmNodeId?
     val configKey: ProviderLaneBConfigKey
@@ -37,9 +37,9 @@ interface ProviderLaneB {
 
 data class ProviderLaneBConfigKey(val model: String, val reasoning: ReasoningLevel, val cache: CachePreference, val output: OutputContract, val providerOptions: JsonObject = emptyJsonObject())
 
-data class ProviderTurn<out B : ProviderLaneB>(val laneB: B, val requestNode: TurnRequestNode, val resultNodeId: LlmNodeId, val config: EffectiveLlmCallConfig, val sessionBlackboard: LlmBlackboard)
+data class ProviderTurnRequest<out B : ProviderLaneB>(val laneB: B, val requestNode: TurnRequestNode, val resultNodeId: LlmNodeId, val config: EffectiveLlmCallConfig, val sessionBlackboard: LlmBlackboard)
 
-data class ProviderTurnCommit<out B : ProviderLaneB>(val laneB: B, val result: TurnResult)
+data class ProviderTurnResultCommit<out B : ProviderLaneB>(val laneB: B, val result: TurnResult)
 
 class LlmSession private constructor(private val sessionTag: String, private val roots: MutableMap<LlmNodeId, RootRevision>, private val nodes: MutableMap<LlmNodeId, SessionNode>, private var activeRootId: LlmNodeId, private var activeNodeId: LlmNodeId?, var backend: ProviderBackend, private var laneB: ProviderLaneB?, var defaults: LlmCallConfig, private val sessionBlackboard: LlmBlackboard, private var nextOrdinal: Int) : LaneA {
     constructor(backend: ProviderBackend, root: SessionRoot = SessionRoot(), defaults: LlmCallConfig = LlmCallConfig(), blackboard: LlmBlackboard = LlmBlackboard.Empty) : this(newSessionTag(), mutableMapOf(), mutableMapOf(), LlmNodeId("pending"), null, backend, null, defaults, blackboard, 0) {
@@ -64,7 +64,7 @@ class LlmSession private constructor(private val sessionTag: String, private val
             laneB = backend.maybeCompact(laneB, requestNode, effective)
             this.laneB = laneB
 
-            val commit = backend.request(ProviderTurn(laneB, requestNode, resultNodeId, effective, blackboardOf(activePath, requestNode)), mode)
+            val commit = backend.request(ProviderTurnRequest(laneB, requestNode, resultNodeId, effective, blackboardOf(activePath, requestNode)), mode)
             val result = commit.result
             val resultNode = TurnResultNode(resultNodeId, requestNode.id, activeRootId, result, result.blackboard)
 
@@ -195,4 +195,4 @@ class LlmSession private constructor(private val sessionTag: String, private val
 // CHECK：传入Shape干嘛，是否多余
 internal fun EffectiveLlmCallConfig.laneBKey(shape: ProviderShape) = ProviderLaneBConfigKey(model, reasoning, cache, output, providerOptions[shape] ?: emptyJsonObject())
 
-internal fun <B : ProviderLaneB> ProviderTurn<*>.typedTurn(laneName: String, cast: (ProviderLaneB) -> B?) = ProviderTurn(cast(laneB) ?: error("LaneB is not $laneName: ${laneB::class.simpleName}"), requestNode, resultNodeId, config, sessionBlackboard)
+internal fun <B : ProviderLaneB> ProviderTurnRequest<*>.typedRequest(laneName: String, cast: (ProviderLaneB) -> B?) = ProviderTurnRequest(cast(laneB) ?: error("LaneB is not $laneName: ${laneB::class.simpleName}"), requestNode, resultNodeId, config, sessionBlackboard)

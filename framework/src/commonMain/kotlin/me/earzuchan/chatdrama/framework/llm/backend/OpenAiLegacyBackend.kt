@@ -12,40 +12,48 @@ private data class OpenAiLegacyLaneB(override val rootRevisionId: LlmNodeId, ove
     override val shape = ProviderShape.OpenAiLegacy
 }
 
+private data class OpenAiLegacyReceived(val nativeMessage: JsonObject?, val result: TurnResult)
+
 class OpenAiLegacyBackend(private val config: OpenAiLegacyBackendConfig) : HttpProviderBackend() {
     override val shape = ProviderShape.OpenAiLegacy
     override val capabilities = LlmCapabilities(setOf(LlmFeature.Content, LlmFeature.Streaming, LlmFeature.ImageInput, LlmFeature.ToolCalling, LlmFeature.JsonOutput), setOf(LlmFeature.PromptCaching, LlmFeature.Reasoning))
 
-    override fun rebuildLaneB(rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB = OpenAiLegacyLaneB(rootRevision.id, nodes.lastOrNull()?.id, config.laneBKey(shape), openAiLegacyRoot(rootRevision.root), openAiLegacyMessages(nodes), sessionBlackboard.onlyPrefixed("openai."))
+    override fun rebuildLaneB(rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB = OpenAiLegacyLaneB(rootRevision.id, nodes.lastOrNull()?.id, config.laneBKey(shape), openAiLegacyRoot(rootRevision.root), projectThinLaneAToOpenAiLegacyMessages(nodes), sessionBlackboard.onlyPrefixed("openai."))
 
     override fun debugLaneB(laneB: ProviderLaneB?) = laneB?.let { debugLaneB(it as? OpenAiLegacyLaneB ?: return@let providerLaneBDebug("OpenAiLegacyLaneB(wrong type)", it)) } ?: "OpenAiLegacyLaneB(null)"
 
-    override suspend fun request(turn: ProviderTurn<ProviderLaneB>, mode: RequestMode): ProviderTurnCommit<ProviderLaneB> = internalRealRequest(turn.typedTurn("OpenAI legacy") { it as? OpenAiLegacyLaneB }, mode)
+    override suspend fun request(providerRequest: ProviderTurnRequest<ProviderLaneB>, mode: RequestMode): ProviderTurnResultCommit<ProviderLaneB> = performRequest(providerRequest.typedRequest("OpenAI legacy") { it as? OpenAiLegacyLaneB }, mode)
 
-    private suspend fun internalRealRequest(turn: ProviderTurn<OpenAiLegacyLaneB>, mode: RequestMode) = when (mode) {
-        RequestMode.Static -> commit(turn, parseOpenAiChatResponse(postJson(chatCompletionsUrl(), headers(), chatCompletionsBody(turn, stream = false)), turn))
-        is RequestMode.Streamed -> commit(turn, stream(turn, mode.observer))
+    private suspend fun performRequest(providerRequest: ProviderTurnRequest<OpenAiLegacyLaneB>, mode: RequestMode): ProviderTurnResultCommit<OpenAiLegacyLaneB> {
+        val received = when (mode) {
+            RequestMode.Static -> receiveStatic(providerRequest)
+            is RequestMode.Streamed -> receiveStream(providerRequest, mode.observer)
+        }
+        return commitReceived(providerRequest, received)
     }
 
-    private suspend fun stream(turn: ProviderTurn<OpenAiLegacyLaneB>, observer: TurnObserver?): TurnResult {
-        val draft = TurnDraft(turn.config.output, observer)
+    private suspend fun receiveStatic(providerRequest: ProviderTurnRequest<OpenAiLegacyLaneB>) = parseOpenAiChatReceived(postJson(chatCompletionsUrl(), headers(), chatCompletionsBody(providerRequest, stream = false)), providerRequest)
+
+    private suspend fun receiveStream(providerRequest: ProviderTurnRequest<OpenAiLegacyLaneB>, observer: TurnObserver?): OpenAiLegacyReceived {
+        val draft = TurnResultDraft(providerRequest.config.output, observer)
+        val native = OpenAiLegacyNativeMessageBuilder()
         var usage: TokenUsage? = null
         var finishReason: String? = null
+        var model = providerRequest.config.model
         val toolIndices = mutableMapOf<Int, Pair<String, String>>()
 
         try {
-            postSse(chatCompletionsUrl(), headers(), chatCompletionsBody(turn, stream = true)) { _, data ->
+            postSse(chatCompletionsUrl(), headers(), chatCompletionsBody(providerRequest, stream = true)) { _, data ->
                 if (data == "[DONE]") return@postSse
                 val raw = parseJsonElementOrNull(data)?.jsonObjectOrNull() ?: return@postSse
+                model = raw.string("model") ?: model
                 parseOpenAiUsage(raw["usage"]?.jsonObjectOrNull())?.let { usage = it }
                 val choice = raw["choices"]?.jsonArrayOrNull()?.firstOrNull()?.jsonObjectOrNull() ?: return@postSse
                 choice.string("finish_reason")?.let { finishReason = it }
                 val delta = choice["delta"]?.jsonObjectOrNull() ?: return@postSse
 
-                delta.string("reasoning_content")?.let { draft.appendReasoning(it, ReasoningKind.Raw) }
-                delta.string("reasoning")?.let { draft.appendReasoning(it, ReasoningKind.Raw) }
-                delta.string("content")?.let { draft.appendContent(it) }
-                delta.string("refusal")?.let { draft.appendRefusal(it) }
+                native.delta(delta)
+                delta.appendOpenAiLegacyTextFieldsTo(draft)
 
                 delta["tool_calls"]?.jsonArrayOrNull().orEmpty().forEach { itemElement ->
                     val item = itemElement.jsonObjectOrNull() ?: return@forEach
@@ -60,9 +68,10 @@ class OpenAiLegacyBackend(private val config: OpenAiLegacyBackendConfig) : HttpP
                 }
             }
             toolIndices.values.forEach { (id, _) -> draft.completeTool(id) }
-            return draft.complete(usage, TurnTrace(shape, turn.config.model, finishReason))
+            val result = draft.complete(usage, TurnTrace(shape, model, finishReason))
+            return OpenAiLegacyReceived(native.message(), result)
         } catch (throwable: Throwable) {
-            throw LlmTurnException(throwable.message ?: "OpenAI legacy stream failed", throwable, draft.partial(usage, TurnTrace(shape, turn.config.model, finishReason)))
+            throw LlmTurnException(throwable.message ?: "OpenAI legacy stream failed", throwable, draft.partial(usage, TurnTrace(shape, model, finishReason)))
         }
     }
 
@@ -78,12 +87,13 @@ class OpenAiLegacyBackend(private val config: OpenAiLegacyBackendConfig) : HttpP
         lane.messages.forEachIndexed { index, message -> appendLine("    [$index] $message") }
     }
 
-    private fun chatCompletionsBody(turn: ProviderTurn<OpenAiLegacyLaneB>, stream: Boolean): JsonObject {
-        val lane = turn.laneB
+    private fun chatCompletionsBody(providerRequest: ProviderTurnRequest<OpenAiLegacyLaneB>, stream: Boolean): JsonObject {
+        val lane = providerRequest.laneB
         val body = buildJsonObject {
-            put("model", turn.config.model)
-            put("messages", openAiLegacyMessages(lane, turn.requestNode.request))
-            turn.config.temperature?.let { put("temperature", it) }
+            put("model", providerRequest.config.model)
+            put("messages", openAiLegacyMessagesForSending(lane, providerRequest.requestNode.request))
+            providerRequest.config.temperature?.let { put("temperature", it) }
+
             if (stream) {
                 put("stream", true)
                 if (config.includeStreamUsage) put("stream_options", buildJsonObject { put("include_usage", true) })
@@ -94,17 +104,22 @@ class OpenAiLegacyBackend(private val config: OpenAiLegacyBackendConfig) : HttpP
                 put("parallel_tool_calls", true)
             }
 
-            openAiLegacyResponseFormat(turn.config.output)?.let { put("response_format", it) }
-            deepSeekCompatibleThinking(turn.config.reasoning)?.let { put("thinking", it) }
-            if (config.sendReasoningEffort) openAiReasoningEffort(turn.config.reasoning)?.let { put("reasoning_effort", it) }
+            openAiLegacyResponseFormat(providerRequest.config.output)?.let { put("response_format", it) }
+            deepSeekCompatibleThinking(providerRequest.config.reasoning)?.let { put("thinking", it) }
+            if (config.sendReasoningEffort) openAiReasoningEffort(providerRequest.config.reasoning)?.let { put("reasoning_effort", it) }
         }
-        return body.merge(turn.config.providerOptions[shape] ?: emptyJsonObject())
+        return body.merge(providerRequest.config.providerOptions[shape] ?: emptyJsonObject())
     }
 
-    private fun commit(turn: ProviderTurn<OpenAiLegacyLaneB>, result: TurnResult): ProviderTurnCommit<OpenAiLegacyLaneB> {
-        val lane = turn.laneB
-        val next = lane.copy(anchorNodeId = turn.resultNodeId, messages = lane.messages + openAiLegacyRequestMessages(turn.requestNode.request) + openAiLegacyAssistantMessage(result), blackboard = lane.blackboard.withAll(result.blackboard.onlyPrefixed("openai."))).tidyAfterAppend()
-        return ProviderTurnCommit(next, result)
+    private fun commitReceived(providerRequest: ProviderTurnRequest<OpenAiLegacyLaneB>, received: OpenAiLegacyReceived): ProviderTurnResultCommit<OpenAiLegacyLaneB> {
+        val lane = providerRequest.laneB
+        val messages = buildList {
+            addAll(lane.messages)
+            addAll(projectTurnRequestToOpenAiLegacyMessages(providerRequest.requestNode.request))
+            received.nativeMessage?.let { add(it) }
+        }
+        val next = lane.copy(anchorNodeId = providerRequest.resultNodeId, messages = messages, blackboard = lane.blackboard.withAll(received.result.blackboard.onlyPrefixed("openai."))).tidyAfterAppend()
+        return ProviderTurnResultCommit(next, received.result)
     }
 }
 
@@ -116,23 +131,23 @@ private fun openAiLegacyRoot(root: SessionRoot) = OpenAiLegacyRoot(
     tools = root.tools.takeIf { it.isNotEmpty() }?.let { buildJsonArray { it.forEach { tool -> add(openAiLegacyTool(tool)) } } }
 )
 
-private fun openAiLegacyMessages(lane: OpenAiLegacyLaneB, request: TurnRequest) = buildJsonArray {
+private fun openAiLegacyMessagesForSending(lane: OpenAiLegacyLaneB, request: TurnRequest) = buildJsonArray {
     lane.root.systemMessage?.let { add(it) }
     lane.messages.forEach { add(it) }
-    openAiLegacyRequestMessages(request).forEach { add(it) }
+    projectTurnRequestToOpenAiLegacyMessages(request).forEach { add(it) }
 }
 
-// TIPS：进行转译+转译中有顺手处理。OAI Legacy 需处理的较少
-private fun openAiLegacyMessages(nodes: List<SessionNode>) = buildList {
+// 重建路径只消费 Session 已经 thin 过的 LaneA。Legacy/DeepSeek 比较宽松，外家思考直接走 reasoning_content
+private fun projectThinLaneAToOpenAiLegacyMessages(nodes: List<SessionNode>) = buildList {
     nodes.forEach { node ->
         when (node) {
-            is TurnRequestNode -> addAll(openAiLegacyRequestMessages(node.request))
-            is TurnResultNode -> add(openAiLegacyAssistantMessage(node.result))
+            is TurnRequestNode -> addAll(projectTurnRequestToOpenAiLegacyMessages(node.request))
+            is TurnResultNode -> add(projectTurnResultToOpenAiLegacyMessage(node.result))
         }
     }
 }
 
-private fun openAiLegacyRequestMessages(request: TurnRequest) = buildList {
+private fun projectTurnRequestToOpenAiLegacyMessages(request: TurnRequest) = buildList {
     request.items.forEach { item ->
         when (item) {
             is TurnInputItem.Content -> add(buildJsonObject {
@@ -150,7 +165,7 @@ private fun openAiLegacyRequestMessages(request: TurnRequest) = buildList {
     }
 }
 
-private fun openAiLegacyAssistantMessage(result: TurnResult) = buildJsonObject {
+private fun projectTurnResultToOpenAiLegacyMessage(result: TurnResult) = buildJsonObject {
     put("role", "assistant")
     val reasoning = result.items.filterIsInstance<TurnItem.Reasoning>().mapNotNull { it.text }.joinToString("\n").takeIf { it.isNotBlank() }
     val text = result.items.mapNotNull {
@@ -163,7 +178,7 @@ private fun openAiLegacyAssistantMessage(result: TurnResult) = buildJsonObject {
     val toolCalls = result.items.filterIsInstance<TurnItem.ToolCall>()
     if (text != null) put("content", text) else put("content", JsonNull)
 
-    // Legacy/DeepSeek 对外家思考也最宽松，直接按 reasoning_content 回填就完事儿，保证工具波不断线
+    // Legacy/DeepSeek 对外家思考也最宽松，直接按 reasoning_content 回填就完事，保证工具波不断线
     reasoning?.let { put("reasoning_content", it) }
     if (toolCalls.isNotEmpty()) put("tool_calls", buildJsonArray {
         toolCalls.forEach { toolCall ->
@@ -179,9 +194,7 @@ private fun openAiLegacyAssistantMessage(result: TurnResult) = buildJsonObject {
     })
 }
 
-private fun OpenAiLegacyLaneB.tidyAfterAppend(): OpenAiLegacyLaneB {
-    return copy(messages = messages.tidyLatestOpenAiLegacyWave())
-}
+private fun OpenAiLegacyLaneB.tidyAfterAppend(): OpenAiLegacyLaneB = copy(messages = messages.tidyLatestOpenAiLegacyWave())
 
 private data class OpenAiLegacyWaveRange(val start: Int, val endExclusive: Int)
 
@@ -217,6 +230,7 @@ private fun JsonObject.openAiLegacyFinalOnly() = buildJsonObject {
 
 private fun openAiLegacyInputContent(parts: List<ContentPart>): JsonElement {
     if (parts.all { it is ContentPart.Text }) return JsonPrimitive(parts.plainText())
+
     return buildJsonArray {
         parts.forEach { part ->
             when (part) {
@@ -264,16 +278,19 @@ private fun openAiLegacyResponseFormat(output: OutputContract): JsonObject? = wh
 
 private fun deepSeekCompatibleThinking(reasoning: ReasoningLevel) = if (reasoning == ReasoningLevel.Off) null else buildJsonObject { put("type", "enabled") }
 
-private suspend fun parseOpenAiChatResponse(raw: JsonObject, turn: ProviderTurn<*>): TurnResult {
-    val draft = TurnDraft(turn.config.output)
+private suspend fun parseOpenAiChatReceived(raw: JsonObject, providerRequest: ProviderTurnRequest<*>): OpenAiLegacyReceived {
+    val draft = TurnResultDraft(providerRequest.config.output)
     val choice = raw["choices"]?.jsonArrayOrNull()?.firstOrNull()?.jsonObjectOrNull()
     val message = choice?.get("message")?.jsonObjectOrNull()
-    message?.string("reasoning_content")?.let { draft.appendReasoning(it, ReasoningKind.Raw) }
-    message?.string("reasoning")?.let { draft.appendReasoning(it, ReasoningKind.Raw) }
-    message?.string("content")?.let { draft.appendContent(it) }
-    message?.string("refusal")?.let { draft.appendRefusal(it) }
+    message?.let { parseOpenAiLegacyMessageToDraft(it, draft) }
+    val result = draft.partial(parseOpenAiUsage(raw["usage"]?.jsonObjectOrNull()), TurnTrace(ProviderShape.OpenAiLegacy, raw.string("model") ?: providerRequest.config.model, choice?.string("finish_reason"), raw))
+    return OpenAiLegacyReceived(message?.normalizeOpenAiLegacyAssistantMessage(), result)
+}
 
-    message?.get("tool_calls")?.jsonArrayOrNull().orEmpty().forEachIndexed { index, itemElement ->
+private suspend fun parseOpenAiLegacyMessageToDraft(message: JsonObject, draft: TurnResultDraft) {
+    message.appendOpenAiLegacyTextFieldsTo(draft)
+
+    message["tool_calls"]?.jsonArrayOrNull().orEmpty().forEachIndexed { index, itemElement ->
         val item = itemElement.jsonObjectOrNull() ?: return@forEachIndexed
         val function = item["function"]?.jsonObjectOrNull() ?: return@forEachIndexed
         val id = item.string("id") ?: "call_$index"
@@ -281,8 +298,73 @@ private suspend fun parseOpenAiChatResponse(raw: JsonObject, turn: ProviderTurn<
         draft.appendToolArguments(id, function.string("name") ?: "function", function.string("arguments").orEmpty())
         draft.completeTool(id)
     }
+}
 
-    return draft.partial(parseOpenAiUsage(raw["usage"]?.jsonObjectOrNull()), TurnTrace(ProviderShape.OpenAiLegacy, raw.string("model") ?: turn.config.model, choice?.string("finish_reason"), raw))
+private suspend fun JsonObject.appendOpenAiLegacyTextFieldsTo(draft: TurnResultDraft) {
+    string("reasoning_content")?.let { draft.appendReasoning(it, ReasoningKind.Raw) }
+    string("reasoning")?.let { draft.appendReasoning(it, ReasoningKind.Raw) }
+    string("content")?.let { draft.appendContent(it) }
+    string("refusal")?.let { draft.appendRefusal(it) }
+}
+
+private class OpenAiLegacyNativeMessageBuilder {
+    private val values = linkedMapOf<String, JsonElement>("role" to JsonPrimitive("assistant"))
+    private val toolCalls = mutableMapOf<Int, ToolCall>()
+
+    fun delta(delta: JsonObject) {
+        delta.string("role")?.let { values["role"] = JsonPrimitive(it) }
+        delta.string("reasoning_content")?.let { values["reasoning_content"] = JsonPrimitive((values["reasoning_content"]?.jsonPrimitiveOrNull()?.contentOrNull ?: "") + it) }
+        delta.string("reasoning")?.let { values["reasoning"] = JsonPrimitive((values["reasoning"]?.jsonPrimitiveOrNull()?.contentOrNull ?: "") + it) }
+        delta.string("content")?.let { values["content"] = JsonPrimitive((values["content"]?.jsonPrimitiveOrNull()?.contentOrNull ?: "") + it) }
+        delta.string("refusal")?.let { values["refusal"] = JsonPrimitive((values["refusal"]?.jsonPrimitiveOrNull()?.contentOrNull ?: "") + it) }
+
+        delta["tool_calls"]?.jsonArrayOrNull().orEmpty().forEach { itemElement ->
+            val item = itemElement.jsonObjectOrNull() ?: return@forEach
+            val index = item.int("index") ?: 0
+            val tool = toolCalls.getOrPut(index) { ToolCall() }
+            tool.delta(item)
+        }
+    }
+
+    fun message() = buildJsonObject {
+        values.forEach { (key, value) -> put(key, value) }
+        if (!values.containsKey("content")) put("content", JsonNull)
+        if (toolCalls.isNotEmpty()) put("tool_calls", buildJsonArray { toolCalls.keys.sorted().forEach { index -> toolCalls[index]?.let { add(it.toJson()) } } })
+    }.normalizeOpenAiLegacyAssistantMessage()
+
+    private class ToolCall {
+        var id: String? = null
+        var type: String? = null
+        var name: String? = null
+        val arguments = StringBuilder()
+
+        fun delta(item: JsonObject) {
+            item.string("id")?.let { id = it }
+            item.string("type")?.let { type = it }
+            item["function"]?.jsonObjectOrNull()?.let { function ->
+                function.string("name")?.let { name = it }
+                function.string("arguments")?.let { arguments.append(it) }
+            }
+        }
+
+        fun toJson() = buildJsonObject {
+            put("id", id ?: "call")
+            put("type", type ?: "function")
+            put("function", buildJsonObject {
+                put("name", name ?: "function")
+                put("arguments", arguments.toString())
+            })
+        }
+    }
+}
+
+private fun JsonObject.normalizeOpenAiLegacyAssistantMessage() = buildJsonObject {
+    put("role", string("role") ?: "assistant")
+    string("content")?.let { put("content", it) } ?: put("content", JsonNull)
+    string("reasoning_content")?.let { put("reasoning_content", it) }
+    string("reasoning")?.let { put("reasoning", it) }
+    string("refusal")?.let { put("refusal", it) }
+    this@normalizeOpenAiLegacyAssistantMessage["tool_calls"]?.jsonArrayOrNull()?.let { put("tool_calls", it) }
 }
 
 private fun parseOpenAiUsage(usage: JsonObject?): TokenUsage? {

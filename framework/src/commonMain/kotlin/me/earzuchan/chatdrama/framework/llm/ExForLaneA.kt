@@ -28,8 +28,7 @@ internal fun List<SessionNode>.toThinPath(): List<SessionNode> {
     return if (result == this) this else result
 }
 
-// TIPS：这个玩意也被GeminiBackend使用了，God Damn！
-internal fun TurnResult.hasToolCalls() = items.any { it is TurnItem.ToolCall }
+private fun TurnResult.hasToolCalls() = items.any { it is TurnItem.ToolCall }
 
 private fun List<SessionNode>.thinIfClosedWave(): List<SessionNode> {
     val first = firstOrNull() as? TurnRequestNode ?: return this

@@ -4,6 +4,7 @@ import kotlinx.serialization.json.*
 import me.earzuchan.chatdrama.framework.llm.*
 import me.earzuchan.chatdrama.framework.llm.misc.*
 
+// TODO：远期尝试支持OpenAI凭证登录
 data class OpenAiResponsesBackendConfig(val apiKey: String, val baseUrl: String = "https://api.openai.com/v1", val organization: String? = null, val project: String? = null, val extraHeaders: Map<String, String> = emptyMap())
 
 private data class OpenAiResponsesRoot(val instructions: String? = null, val tools: JsonArray? = null)
@@ -45,35 +46,36 @@ class OpenAiResponsesBackend(private val config: OpenAiResponsesBackendConfig) :
 
     override fun debugLaneB(laneB: ProviderLaneB?) = laneB?.let { debugLaneB(it as? OpenAiResponsesLaneB ?: return@let providerLaneBDebug("OpenAiResponsesLaneB(wrong type)", it)) } ?: "OpenAiResponsesLaneB(null)"
 
-    override suspend fun request(turn: ProviderTurn<ProviderLaneB>, mode: RequestMode): ProviderTurnCommit<ProviderLaneB> = requestResponses(turn.typedTurn("OpenAI responses") { it as? OpenAiResponsesLaneB }, mode)
+    override suspend fun request(providerRequest: ProviderTurnRequest<ProviderLaneB>, mode: RequestMode): ProviderTurnResultCommit<ProviderLaneB> = requestResponses(providerRequest.typedRequest("OpenAI responses") { it as? OpenAiResponsesLaneB }, mode)
 
-    private suspend fun requestResponses(turn: ProviderTurn<OpenAiResponsesLaneB>, mode: RequestMode): ProviderTurnCommit<OpenAiResponsesLaneB> {
+    private suspend fun requestResponses(providerRequest: ProviderTurnRequest<OpenAiResponsesLaneB>, mode: RequestMode): ProviderTurnResultCommit<OpenAiResponsesLaneB> {
         try {
             val received = when (mode) {
-                RequestMode.Static -> receiveStatic(turn)
+                RequestMode.Static -> receiveStatic(providerRequest)
 
-                is RequestMode.Streamed -> receiveStream(turn, mode.observer)
+                is RequestMode.Streamed -> receiveStream(providerRequest, mode.observer)
             }
 
-            return commitReceived(turn, received)
+            return commitReceived(providerRequest, received)
         } catch (throwable: LlmProviderException) {
-            if (!throwable.isOpenAiResponsesPreviousResponseUnsupported() || turn.laneB.context !is OpenAiResponsesContext.StatefulByPreviousId) throw throwable
+            if (!throwable.isOpenAiResponsesPreviousResponseUnsupported() || providerRequest.laneB.context !is OpenAiResponsesContext.StatefulByPreviousId) throw throwable
 
             // TIPS：以下是处理服务器不支持“服务器状态留存”，退化到关闭服务器状态，重新请求
-            return requestResponses(turn.copy(laneB = turn.laneB.fallbackFromPreviousResponseUnsupported()), mode)
+            return requestResponses(providerRequest.copy(laneB = providerRequest.laneB.fallbackFromPreviousResponseUnsupported()), mode)
         }
     }
 
-    private suspend fun receiveStatic(turn: ProviderTurn<OpenAiResponsesLaneB>) = parseReceived(postJson(responsesUrl(), headers(), responsesBody(turn, streamly = false)), turn)
+    private suspend fun receiveStatic(providerRequest: ProviderTurnRequest<OpenAiResponsesLaneB>) = parseReceived(postJson(responsesUrl(), headers(), responsesBody(providerRequest, streamly = false)), providerRequest)
 
-    private suspend fun receiveStream(turn: ProviderTurn<OpenAiResponsesLaneB>, observer: TurnObserver?): OpenAiResponsesReceived {
-        val draft = TurnDraft(turn.config.output, observer)
+    private suspend fun receiveStream(providerRequest: ProviderTurnRequest<OpenAiResponsesLaneB>, observer: TurnObserver?): OpenAiResponsesReceived {
+        val draft = TurnResultDraft(providerRequest.config.output, observer)
         val tools = mutableMapOf<String, Pair<String, String>>()
         var completedRaw: JsonObject? = null
 
         try {
-            postSse(responsesUrl(), headers(), responsesBody(turn, streamly = true)) { event, data ->
+            postSse(responsesUrl(), headers(), responsesBody(providerRequest, streamly = true)) { event, data ->
                 val raw = parseJsonElementOrNull(data)?.jsonObjectOrNull() ?: return@postSse
+
                 when (event) {
                     "response.output_text.delta" -> draft.appendContent(raw.string("delta").orEmpty())
 
@@ -101,14 +103,14 @@ class OpenAiResponsesBackend(private val config: OpenAiResponsesBackendConfig) :
                 }
             }
 
-            val raw = completedRaw ?: throw LlmTurnException("OpenAI responses stream ended without response.completed.", partial = draft.partial(trace = TurnTrace(shape, turn.config.model)))
-            val received = parseReceived(raw, turn, if (draft.isEmpty()) observer else null)
+            val raw = completedRaw ?: throw LlmTurnException("OpenAI responses stream ended without response.completed.", partial = draft.partial(trace = TurnTrace(shape, providerRequest.config.model)))
+            val received = parseReceived(raw, providerRequest, if (draft.isEmpty()) observer else null) // TIPS：设计貌似想，如果流式的Draft是空的，却又收到了总和内容，就让观察者去接受总和的Draft Perceiving
 
             if (!draft.isEmpty()) draft.completeWith(received.result)
             return received
         } catch (throwable: Throwable) {
             if (throwable is LlmProviderException || throwable is LlmTurnException) throw throwable
-            throw LlmTurnException(throwable.message ?: "OpenAI responses stream failed", throwable, draft.partial(trace = TurnTrace(shape, turn.config.model)))
+            throw LlmTurnException(throwable.message ?: "OpenAI responses stream failed", throwable, draft.partial(trace = TurnTrace(shape, providerRequest.config.model)))
         }
     }
 
@@ -133,38 +135,38 @@ class OpenAiResponsesBackend(private val config: OpenAiResponsesBackendConfig) :
         }
     }
 
-    private fun responsesBody(turn: ProviderTurn<OpenAiResponsesLaneB>, streamly: Boolean): JsonObject {
-        val lane = turn.laneB
+    private fun responsesBody(providerRequest: ProviderTurnRequest<OpenAiResponsesLaneB>, streamly: Boolean): JsonObject {
+        val lane = providerRequest.laneB
 
         val body = buildJsonObject {
-            put("model", turn.config.model)
+            put("model", providerRequest.config.model)
             lane.root.instructions?.let { put("instructions", it) }
 
             when (val context = lane.context) {
-                is OpenAiResponsesContext.Stateless -> put("input", appendCurrentRequest(context.input, turn.requestNode.request))
+                is OpenAiResponsesContext.Stateless -> put("input", appendCurrentRequest(context.input, providerRequest.requestNode.request))
                 is OpenAiResponsesContext.StatefulByPreviousId -> {
                     put("previous_response_id", context.id)
-                    put("input", projectTurnRequestToResponsesInput(turn.requestNode.request).toJsonArray())
+                    put("input", projectTurnRequestToResponsesInput(providerRequest.requestNode.request).toJsonArray())
                 }
             }
 
-            turn.config.temperature?.let { put("temperature", it) }
+            providerRequest.config.temperature?.let { put("temperature", it) }
             if (streamly) put("stream", true)
 
             lane.root.tools?.takeIf { it.isNotEmpty() }?.let {
                 put("tools", it)
                 put("parallel_tool_calls", true)
             }
-            openAiResponsesTextFormat(turn.config.output)?.let { put("text", buildJsonObject { put("format", it) }) }
-            openAiResponsesReasoning(turn.config.reasoning)?.let { put("reasoning", it) }
+            openAiResponsesTextFormat(providerRequest.config.output)?.let { put("text", buildJsonObject { put("format", it) }) }
+            openAiResponsesReasoning(providerRequest.config.reasoning)?.let { put("reasoning", it) }
         }
 
-        return body.merge(turn.config.providerOptions[shape] ?: emptyJsonObject()).withOpenAiResponsesInternalStateOptions(turn.config)
+        return body.merge(providerRequest.config.providerOptions[shape] ?: emptyJsonObject()).withOpenAiResponsesInternalStateOptions(providerRequest.config)
     }
 
-    private fun commitReceived(turn: ProviderTurn<OpenAiResponsesLaneB>, received: OpenAiResponsesReceived): ProviderTurnCommit<OpenAiResponsesLaneB> {
-        val lane = turn.laneB
-        val requestInput = projectTurnRequestToResponsesInput(turn.requestNode.request)
+    private fun commitReceived(providerRequest: ProviderTurnRequest<OpenAiResponsesLaneB>, received: OpenAiResponsesReceived): ProviderTurnResultCommit<OpenAiResponsesLaneB> {
+        val lane = providerRequest.laneB
+        val requestInput = projectTurnRequestToResponsesInput(providerRequest.requestNode.request)
         val responseId = received.result.blackboard.string("openai.responses.response_id")
         val blackboard = lane.blackboard.withAll(received.result.blackboard.onlyPrefixed("openai."))
         val resultBlackboard = received.result.blackboard.withAll(lane.blackboard.onlyPrefixed(OPENAI_RESPONSES_PREVIOUS_RESPONSE_UNSUPPORTED))
@@ -181,11 +183,12 @@ class OpenAiResponsesBackend(private val config: OpenAiResponsesBackendConfig) :
             }
         }
 
-        val next = lane.copy(anchorNodeId = turn.resultNodeId, context = context, blackboard = blackboard).tidyAfterAppend()
+        val next = lane.copy(anchorNodeId = providerRequest.resultNodeId, context = context, blackboard = blackboard).tidyAfterAppend()
         val result = if (resultBlackboard == received.result.blackboard) received.result else received.result.copy(blackboard = resultBlackboard)
-        return ProviderTurnCommit(next, result)
+        return ProviderTurnResultCommit(next, result)
     }
 
+    // 有无状态均可压缩
     private fun compactionBody(lane: OpenAiResponsesLaneB, config: EffectiveLlmCallConfig) = buildJsonObject {
         put("model", config.model)
         lane.root.instructions?.let { put("instructions", it) }
@@ -278,10 +281,11 @@ private fun TurnItem.Reasoning.toOpenAiResponsesReasoningInput() = buildJsonObje
     }) }) }
 }
 
-private suspend fun parseReceived(raw: JsonObject, turn: ProviderTurn<*>, observer: TurnObserver? = null): OpenAiResponsesReceived {
+private suspend fun parseReceived(raw: JsonObject, providerRequest: ProviderTurnRequest<*>, observer: TurnObserver? = null): OpenAiResponsesReceived {
     val output = raw.outputItems()
-    // println("恩情难下：$output")
-    val draft = TurnDraft(turn.config.output, observer)
+
+    // 这里重创建了draft。如果本就是流式，有合流问题
+    val draft = TurnResultDraft(providerRequest.config.output, observer)
 
     output.forEachIndexed { index, item ->
         when (item.string("type")) {
@@ -293,11 +297,11 @@ private suspend fun parseReceived(raw: JsonObject, turn: ProviderTurn<*>, observ
     raw.string("output_text")?.takeIf { it.isNotBlank() && draft.partial().items.none { item -> item is TurnItem.Content } }?.let { draft.appendContent(it) }
 
     val blackboard = raw.string("id")?.let { LlmBlackboard.Empty.with("openai.responses.response_id", it) } ?: LlmBlackboard.Empty
-    val trace = TurnTrace(ProviderShape.OpenAiResponses, raw.string("model") ?: turn.config.model, raw.string("status"), raw, blackboard)
+    val trace = TurnTrace(ProviderShape.OpenAiResponses, raw.string("model") ?: providerRequest.config.model, raw.string("status"), raw, blackboard)
     return OpenAiResponsesReceived(output, draft.complete(parseOpenAiResponsesUsage(raw["usage"]?.jsonObjectOrNull()), trace, blackboard))
 }
 
-private suspend fun parseMessageItem(item: JsonObject, draft: TurnDraft) {
+private suspend fun parseMessageItem(item: JsonObject, draft: TurnResultDraft) {
     item["content"]?.jsonArrayOrNull().orEmpty().forEach { contentElement ->
         val content = contentElement.jsonObjectOrNull() ?: return@forEach
         when (content.string("type")) {
@@ -308,7 +312,7 @@ private suspend fun parseMessageItem(item: JsonObject, draft: TurnDraft) {
     }
 }
 
-private suspend fun parseFunctionCallItem(item: JsonObject, index: Int, draft: TurnDraft) {
+private suspend fun parseFunctionCallItem(item: JsonObject, index: Int, draft: TurnResultDraft) {
     val id = item.string("call_id") ?: item.string("id") ?: "call_$index"
     val name = item.string("name") ?: "function"
     draft.startTool(id, name)
@@ -316,7 +320,7 @@ private suspend fun parseFunctionCallItem(item: JsonObject, index: Int, draft: T
     draft.completeTool(id)
 }
 
-private suspend fun parseReasoningItem(item: JsonObject, draft: TurnDraft) {
+private suspend fun parseReasoningItem(item: JsonObject, draft: TurnResultDraft) {
     val blackboard = item.string("encrypted_content")?.let { LlmBlackboard.Empty.with("openai.responses.reasoning_encrypted_content", it) } ?: LlmBlackboard.Empty
     val summaries = item["summary"]?.jsonArrayOrNull().orEmpty().mapNotNull { it.jsonObjectOrNull()?.string("text") }
     if (summaries.isEmpty()) {
@@ -462,6 +466,7 @@ private fun LlmBlackboard.openAiResponsesLaneBlackboard() = onlyPrefixed("openai
 
 private const val OPENAI_RESPONSES_PREVIOUS_RESPONSE_UNSUPPORTED = "openai.responses.previous_response_id_unsupported"
 
+// CHECK：这个有点硬核
 private fun LlmProviderException.isOpenAiResponsesPreviousResponseUnsupported() = body.contains("previous_response_id") && (body.contains("unsupported", ignoreCase = true) || body.contains("only supported", ignoreCase = true))
 
 private fun JsonObject.openAiResponsesToolKey() = string("call_id") ?: string("item_id") ?: int("output_index")?.toString()

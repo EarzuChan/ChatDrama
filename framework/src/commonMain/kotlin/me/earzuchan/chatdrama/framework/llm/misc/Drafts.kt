@@ -2,7 +2,7 @@ package me.earzuchan.chatdrama.framework.llm.misc
 
 import me.earzuchan.chatdrama.framework.llm.*
 
-internal class TurnDraft(private val output: OutputContract, private val observer: TurnObserver? = null) {
+internal class TurnResultDraft(private val output: OutputContract, private val observer: TurnObserver? = null) {
     private val items = mutableListOf<DraftItem>()
     private val completedIds = mutableSetOf<String>()
 

@@ -18,7 +18,7 @@ interface ProviderBackend {
     // TIPS：Rebuild出来的爆窗没事：发送前会过maybeCompact
     fun rebuildLaneB(rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB
 
-    suspend fun request(turn: ProviderTurn<ProviderLaneB>, mode: RequestMode): ProviderTurnCommit<ProviderLaneB>
+    suspend fun request(providerRequest: ProviderTurnRequest<ProviderLaneB>, mode: RequestMode): ProviderTurnResultCommit<ProviderLaneB>
 
     suspend fun compact(laneB: ProviderLaneB, rootRevision: RootRevision, nodes: List<SessionNode>, config: EffectiveLlmCallConfig, sessionBlackboard: LlmBlackboard): ProviderLaneB {
         // TODO：未来给各大压缩：手动触发，压 laneB。这里是默认实现，可被重写
