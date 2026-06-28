@@ -10,7 +10,6 @@ import org.koin.core.context.GlobalContext
 import org.koin.core.context.startKoin
 import kotlin.test.Test
 
-
 const val VANYO_BASE_URL = "https://cn.vanyospace.com"
 const val VANYO_MODEL_GPT5_5 = "gpt-5.5"
 const val DEEPSEEK_BASE_URL = "https://api.deepseek.com"

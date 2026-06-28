@@ -36,7 +36,6 @@ class OpenAiLegacyBackend(private val config: OpenAiLegacyBackendConfig) : HttpP
 
     private suspend fun receiveStream(providerRequest: ProviderTurnRequest<OpenAiLegacyLaneB>, observer: TurnObserver?): OpenAiLegacyReceived {
         val draft = TurnResultDraft(providerRequest.config.output, observer)
-        val native = OpenAiLegacyNativeMessageBuilder()
         var usage: TokenUsage? = null
         var finishReason: String? = null
         var model = providerRequest.config.model
@@ -52,7 +51,6 @@ class OpenAiLegacyBackend(private val config: OpenAiLegacyBackendConfig) : HttpP
                 choice.string("finish_reason")?.let { finishReason = it }
                 val delta = choice["delta"]?.jsonObjectOrNull() ?: return@postSse
 
-                native.delta(delta)
                 delta.appendOpenAiLegacyTextFieldsTo(draft)
 
                 delta["tool_calls"]?.jsonArrayOrNull().orEmpty().forEach { itemElement ->
@@ -69,7 +67,7 @@ class OpenAiLegacyBackend(private val config: OpenAiLegacyBackendConfig) : HttpP
             }
             toolIndices.values.forEach { (id, _) -> draft.completeTool(id) }
             val result = draft.complete(usage, TurnTrace(shape, model, finishReason))
-            return OpenAiLegacyReceived(native.message(), result)
+            return OpenAiLegacyReceived(projectTurnResultToOpenAiLegacyMessage(result), result)
         } catch (throwable: Throwable) {
             throw LlmTurnException(throwable.message ?: "OpenAI legacy stream failed", throwable, draft.partial(usage, TurnTrace(shape, model, finishReason)))
         }
@@ -305,57 +303,6 @@ private suspend fun JsonObject.appendOpenAiLegacyTextFieldsTo(draft: TurnResultD
     string("reasoning")?.let { draft.appendReasoning(it, ReasoningKind.Raw) }
     string("content")?.let { draft.appendContent(it) }
     string("refusal")?.let { draft.appendRefusal(it) }
-}
-
-private class OpenAiLegacyNativeMessageBuilder {
-    private val values = linkedMapOf<String, JsonElement>("role" to JsonPrimitive("assistant"))
-    private val toolCalls = mutableMapOf<Int, ToolCall>()
-
-    fun delta(delta: JsonObject) {
-        delta.string("role")?.let { values["role"] = JsonPrimitive(it) }
-        delta.string("reasoning_content")?.let { values["reasoning_content"] = JsonPrimitive((values["reasoning_content"]?.jsonPrimitiveOrNull()?.contentOrNull ?: "") + it) }
-        delta.string("reasoning")?.let { values["reasoning"] = JsonPrimitive((values["reasoning"]?.jsonPrimitiveOrNull()?.contentOrNull ?: "") + it) }
-        delta.string("content")?.let { values["content"] = JsonPrimitive((values["content"]?.jsonPrimitiveOrNull()?.contentOrNull ?: "") + it) }
-        delta.string("refusal")?.let { values["refusal"] = JsonPrimitive((values["refusal"]?.jsonPrimitiveOrNull()?.contentOrNull ?: "") + it) }
-
-        delta["tool_calls"]?.jsonArrayOrNull().orEmpty().forEach { itemElement ->
-            val item = itemElement.jsonObjectOrNull() ?: return@forEach
-            val index = item.int("index") ?: 0
-            val tool = toolCalls.getOrPut(index) { ToolCall() }
-            tool.delta(item)
-        }
-    }
-
-    fun message() = buildJsonObject {
-        values.forEach { (key, value) -> put(key, value) }
-        if (!values.containsKey("content")) put("content", JsonNull)
-        if (toolCalls.isNotEmpty()) put("tool_calls", buildJsonArray { toolCalls.keys.sorted().forEach { index -> toolCalls[index]?.let { add(it.toJson()) } } })
-    }.normalizeOpenAiLegacyAssistantMessage()
-
-    private class ToolCall {
-        var id: String? = null
-        var type: String? = null
-        var name: String? = null
-        val arguments = StringBuilder()
-
-        fun delta(item: JsonObject) {
-            item.string("id")?.let { id = it }
-            item.string("type")?.let { type = it }
-            item["function"]?.jsonObjectOrNull()?.let { function ->
-                function.string("name")?.let { name = it }
-                function.string("arguments")?.let { arguments.append(it) }
-            }
-        }
-
-        fun toJson() = buildJsonObject {
-            put("id", id ?: "call")
-            put("type", type ?: "function")
-            put("function", buildJsonObject {
-                put("name", name ?: "function")
-                put("arguments", arguments.toString())
-            })
-        }
-    }
 }
 
 private fun JsonObject.normalizeOpenAiLegacyAssistantMessage() = buildJsonObject {
