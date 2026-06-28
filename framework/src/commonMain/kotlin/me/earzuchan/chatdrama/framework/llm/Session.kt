@@ -50,9 +50,8 @@ class LlmSession private constructor(private val sessionTag: String, private val
 
     override val activeRoot get() = roots.getValue(activeRootId)
     override val activeNode get() = activeNodeId?.let(nodes::get)
-    val blackboard get() = activeBlackboard()
 
-    // 发送一次TurnRequest
+    // TIPS：发送一次TurnRequest
     suspend fun request(request: TurnRequest, config: LlmCallConfig = LlmCallConfig(), mode: RequestMode = RequestMode.Streamed()): TurnResult {
         val requestNode = TurnRequestNode(newId("request"), activeNodeId, activeRootId, request, config, request.blackboard)
         val resultNodeId = newId("result")
@@ -81,7 +80,8 @@ class LlmSession private constructor(private val sessionTag: String, private val
         }
     }
 
-    suspend fun compactForProvideRequestSending(config: LlmCallConfig = LlmCallConfig()) = compactLaneB(config)
+    // TIPS：主动申请压缩提供商上下文（即：Lane B）
+    suspend fun compactProviderContext(config: LlmCallConfig = LlmCallConfig()) = compactLaneB(config)
 
     private suspend fun compactLaneB(config: LlmCallConfig = LlmCallConfig()) { // 实为：压缩 LaneB
         val effective = resolveConfig(config)
@@ -89,6 +89,7 @@ class LlmSession private constructor(private val sessionTag: String, private val
         laneB = backend.compact(ensureLaneB(effective, path), activeRoot, path, effective, blackboardOf(path))
     }
 
+    // TIPS：取从根到当前节点的活动节点链
     override fun activePath(): List<SessionNode> {
         val path = mutableListOf<SessionNode>()
         var current = activeNodeId
@@ -102,8 +103,10 @@ class LlmSession private constructor(private val sessionTag: String, private val
         return path.asReversed()
     }
 
+    // TIPS：按 id 查 Lane A 节点
     override fun node(id: LlmNodeId) = nodes[id]
 
+    // TIPS：返回当前路径聚合黑板
     override fun activeBlackboard() = blackboardOf(activePath())
 
     fun debugLaneA() = buildString {
@@ -122,31 +125,37 @@ class LlmSession private constructor(private val sessionTag: String, private val
 
     fun debugLaneB() = backend.debugLaneB(laneB)
 
+    // TIPS：切换当前活动节点，相当于在历史树上跳转
     fun checkout(nodeId: LlmNodeId?) {
         if (nodeId != null && nodeId !in nodes) error("Unknown node: $nodeId")
         activeNodeId = nodeId
     }
 
+    // TIPS：从某个节点分叉出新 LlmSession，可复用匹配的 Lane B（这个复用，AI说不会导致原会话出问题）
     fun fork(from: LlmNodeId? = activeNodeId): LlmSession {
         if (from != null && from !in nodes) error("Unknown node: $from")
         val reusableLaneB = laneB?.takeIf { it.shape == backend.shape && it.rootRevisionId == activeRootId && it.anchorNodeId == from }
         return LlmSession(newSessionTag(), roots.toMutableMap(), nodes.toMutableMap(), activeRootId, from, backend, reusableLaneB, defaults, sessionBlackboard, nextOrdinal)
     }
 
-    // 原地切换供应商
+    // TIPS：原地切换供应商
     fun switchProvider(backend: ProviderBackend, defaults: LlmCallConfig = LlmCallConfig()) {
         this.backend = backend
         this.defaults = defaults
         laneB = null
     }
 
+    // TIPS：原地编辑根
     fun editRoot(transform: (SessionRoot) -> SessionRoot) {
         val rootId = newId("root")
         roots[rootId] = RootRevision(rootId, transform(activeRoot.root), activeRootId)
         activeRootId = rootId
     }
 
+    // TIPS：编辑根后整出新会话
     fun forkWithEditedRoot(transform: (SessionRoot) -> SessionRoot) = fork().also { it.editRoot(transform) }
+
+    // TIPS：这俩设计得不太好？让用户直接遍历节点？？为什么不是replaceNode，或者是索引器以Turn为粒度，可以替换Turn的Request/Result
 
     fun replaceRequest(nodeId: LlmNodeId, request: TurnRequest) {
         val old = nodes[nodeId] as? TurnRequestNode ?: error("Node is not a request node: $nodeId")

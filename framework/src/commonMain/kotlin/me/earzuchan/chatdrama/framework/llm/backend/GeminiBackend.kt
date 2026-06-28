@@ -185,6 +185,8 @@ private fun projectTurnResultToGeminiContent(result: TurnResult, textualizedTool
     }
 }
 
+private fun TurnResult.hasGeminiNativeToolChain() = isFrom(ProviderShape.Gemini) && items.filterIsInstance<TurnItem.ToolCall>().all { it.blackboard.string("gemini.thought_signature") != null }
+
 private suspend fun parseGeminiReceived(raw: JsonObject, providerRequest: ProviderTurnRequest<*>): GeminiReceived {
     val draft = TurnResultDraft(providerRequest.config.output)
     val candidate = raw.geminiPrimaryCandidate()

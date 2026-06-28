@@ -199,6 +199,8 @@ private fun projectTurnResultToClaudeMessage(result: TurnResult) = buildJsonObje
     })
 }
 
+private fun TurnResult.hasClaudeNativeThinking() = isFrom(ProviderShape.Claude) && items.filterIsInstance<TurnItem.Reasoning>().all { (it.kind == ReasoningKind.Redacted && it.blackboard.string("claude.messages.redacted_thinking") != null) || (it.kind != ReasoningKind.Redacted && it.blackboard.string("claude.messages.thinking_signature") != null) }
+
 private suspend fun parseClaudeReceived(raw: JsonObject, providerRequest: ProviderTurnRequest<*>): ClaudeReceived {
     val draft = TurnResultDraft(providerRequest.config.output)
     val content = raw["content"]?.jsonArrayOrNull() ?: JsonArray(emptyList())

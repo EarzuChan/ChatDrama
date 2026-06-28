@@ -1,15 +1,15 @@
 package me.earzuchan.chatdrama.framework.llm.backend
 
-import me.earzuchan.chatdrama.framework.llm.*
+import me.earzuchan.chatdrama.framework.llm.ProviderShape
+import me.earzuchan.chatdrama.framework.llm.ReasoningKind
+import me.earzuchan.chatdrama.framework.llm.TurnInputItem
+import me.earzuchan.chatdrama.framework.llm.TurnItem
+import me.earzuchan.chatdrama.framework.llm.TurnResult
 import me.earzuchan.chatdrama.framework.llm.misc.*
 
 internal fun TurnResult.isFrom(shape: ProviderShape) = trace.shape == shape
 
-internal fun TurnResult.hasGeminiNativeToolChain() = isFrom(ProviderShape.Gemini) && items.filterIsInstance<TurnItem.ToolCall>().all { it.blackboard.string("gemini.thought_signature") != null }
-
-internal fun TurnResult.hasClaudeNativeThinking() = isFrom(ProviderShape.Claude) && items.filterIsInstance<TurnItem.Reasoning>().all { (it.kind == ReasoningKind.Redacted && it.blackboard.string("claude.messages.redacted_thinking") != null) || (it.kind != ReasoningKind.Redacted && it.blackboard.string("claude.messages.thinking_signature") != null) }
-
-// TIPS：以下逻辑有点共用，给各家使用，可能有点乱
+// 以下那些是为了转厂的原厂内容乔装而设的
 
 internal fun TurnResult.previousAssistantText(includeReasoning: Boolean = true, includeTools: Boolean = true, includeContent: Boolean = true): String? {
     val blocks = buildList {
@@ -40,11 +40,13 @@ internal fun TurnInputItem.ToolResult.previousToolResultText() = buildString {
 
 internal fun TurnItem.Reasoning.previousThoughtText(): String? {
     val text = text?.takeIf { it.isNotBlank() } ?: return null
+
     val title = when (kind) {
         ReasoningKind.Raw -> "[previous assistant raw thought]"
         ReasoningKind.Summary -> "[previous assistant thought]"
         ReasoningKind.Redacted -> "[previous assistant redacted thought]"
-        ReasoningKind.Opaque -> "[previous assistant opaque thought]"
+        ReasoningKind.Opaque -> "[previous assistant opaque thought]" // TIPS、CHECK：透传的，若不是明文，则招笑
     }
+
     return "$title\n$text"
 }
