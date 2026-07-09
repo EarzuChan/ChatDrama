@@ -4,6 +4,7 @@ import me.earzuchan.chatdrama.framework.llm.ProviderShape
 import me.earzuchan.chatdrama.framework.llm.ReasoningKind
 import me.earzuchan.chatdrama.framework.llm.TurnInputItem
 import me.earzuchan.chatdrama.framework.llm.TurnItem
+import me.earzuchan.chatdrama.framework.llm.TurnItemKind
 import me.earzuchan.chatdrama.framework.llm.TurnResult
 import me.earzuchan.chatdrama.framework.llm.misc.*
 
@@ -49,4 +50,11 @@ internal fun TurnItem.Reasoning.previousThoughtText(): String? {
     }
 
     return "$title\n$text"
+}
+
+internal fun TurnItem.kind() = when (this) {
+    is TurnItem.Content -> TurnItemKind.Content
+    is TurnItem.Reasoning -> TurnItemKind.Reasoning
+    is TurnItem.ToolCall -> TurnItemKind.ToolCall
+    is TurnItem.Refusal -> TurnItemKind.Refusal
 }

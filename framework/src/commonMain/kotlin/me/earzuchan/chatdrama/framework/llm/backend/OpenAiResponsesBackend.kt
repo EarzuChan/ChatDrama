@@ -68,8 +68,7 @@ class OpenAiResponsesBackend(private val config: OpenAiResponsesBackendConfig) :
     private suspend fun receiveStatic(providerRequest: ProviderTurnRequest<OpenAiResponsesLaneB>) = parseReceived(postJson(responsesUrl(), headers(), responsesBody(providerRequest, streamly = false)), providerRequest)
 
     private suspend fun receiveStream(providerRequest: ProviderTurnRequest<OpenAiResponsesLaneB>, observer: TurnObserver?): OpenAiResponsesReceived {
-        val draft = TurnResultDraft(providerRequest.config.output, observer)
-        val tools = mutableMapOf<String, Pair<String, String>>()
+        val draft = OpenAiResponsesStreamDraft(providerRequest.config.output, observer)
         var completedRaw: JsonObject? = null
 
         try {
@@ -77,40 +76,16 @@ class OpenAiResponsesBackend(private val config: OpenAiResponsesBackendConfig) :
                 val raw = parseJsonElementOrNull(data)?.jsonObjectOrNull() ?: return@postSse
 
                 when (event) {
-                    "response.output_text.delta" -> draft.appendContent(raw.string("delta").orEmpty())
-
-                    "response.refusal.delta" -> draft.appendRefusal(raw.string("delta"))
-
-                    "response.reasoning_text.delta", "response.reasoning.delta", "response.reasoning_summary_text.delta" -> draft.appendReasoning(raw.string("delta").orEmpty())
-
-                    "response.output_item.added" -> raw["item"]?.jsonObjectOrNull()?.let { item ->
-                        if (item.string("type") == "function_call") {
-                            val id = item.string("call_id") ?: item.string("id") ?: raw.int("output_index")?.let { "call_$it" } ?: "call"
-                            val name = item.string("name") ?: "function"
-                            raw.openAiResponsesToolKeys(item).forEach { tools[it] = id to name }
-                            draft.startTool(id, name)
-                        }
-                    }
-
-                    "response.function_call_arguments.delta" -> {
-                        val tool = raw.openAiResponsesToolKey()?.let(tools::get)
-                        val id = raw.string("call_id") ?: tool?.first ?: raw.string("item_id") ?: raw.int("output_index")?.let { "call_$it" } ?: "call"
-                        val name = raw.string("name") ?: tool?.second ?: "function"
-                        draft.appendToolArguments(id, name, raw.string("delta").orEmpty())
-                    }
-
+                    "response.output_item.added" -> raw["item"]?.jsonObjectOrNull()?.let { draft.outputItemAdded(raw, it) }
+                    "response.output_text.delta", "response.refusal.delta", "response.reasoning_text.delta", "response.reasoning.delta", "response.reasoning_summary_text.delta", "response.function_call_arguments.delta" -> draft.delta(event, raw)
                     "response.completed" -> completedRaw = raw["response"]?.jsonObjectOrNull()
                 }
             }
 
-            val raw = completedRaw ?: throw LlmTurnException("OpenAI responses stream ended without response.completed.", partial = draft.partial(trace = TurnTrace(shape, providerRequest.config.model)))
-            val received = parseReceived(raw, providerRequest, if (draft.isEmpty()) observer else null) // TIPS：设计貌似想，如果流式的Draft是空的，却又收到了总和内容，就让观察者去接受总和的Draft Perceiving
-
-            if (!draft.isEmpty()) draft.completeWith(received.result)
-            return received
+            return draft.complete(completedRaw, providerRequest)
         } catch (throwable: Throwable) {
             if (throwable is LlmProviderException || throwable is LlmTurnException) throw throwable
-            throw LlmTurnException(throwable.message ?: "OpenAI responses stream failed", throwable, draft.partial(trace = TurnTrace(shape, providerRequest.config.model)))
+            throw LlmTurnException(throwable.message ?: "OpenAI responses stream failed", throwable, draft.partial(providerRequest))
         }
     }
 
@@ -236,6 +211,7 @@ private fun projectTurnRequestToResponsesInput(request: TurnRequest) = buildList
                 put("role", "user")
                 put("content", openAiResponsesInputContent(item.parts))
             })
+
             is TurnInputItem.ToolResult -> add(buildJsonObject {
                 put("type", "function_call_output")
                 put("call_id", item.toolCallId)
@@ -246,10 +222,12 @@ private fun projectTurnRequestToResponsesInput(request: TurnRequest) = buildList
 }
 
 private fun projectTurnResultToResponsesInput(result: TurnResult): List<JsonObject> = buildList {
-    if (!result.isFrom(ProviderShape.OpenAiResponses)) result.previousReasoningText()?.let { add(buildJsonObject {
-        put("role", "assistant")
-        put("content", it)
-    }) }
+    if (!result.isFrom(ProviderShape.OpenAiResponses)) result.previousReasoningText()?.let {
+        add(buildJsonObject {
+            put("role", "assistant")
+            put("content", it)
+        })
+    }
 
     result.items.forEach { item ->
         when (item) {
@@ -257,17 +235,21 @@ private fun projectTurnResultToResponsesInput(result: TurnResult): List<JsonObje
                 put("role", "assistant")
                 put("content", item.asText())
             })
+
             is TurnItem.ToolCall -> add(buildJsonObject {
                 put("type", "function_call")
                 put("call_id", item.id)
                 put("name", item.name)
                 put("arguments", item.arguments.toString())
             })
+
             is TurnItem.Reasoning -> if (result.isFrom(ProviderShape.OpenAiResponses)) add(item.toOpenAiResponsesReasoningInput()) else Unit
-            is TurnItem.Refusal -> item.text?.let { add(buildJsonObject {
-                put("role", "assistant")
-                put("content", it)
-            }) }
+            is TurnItem.Refusal -> item.text?.let {
+                add(buildJsonObject {
+                    put("role", "assistant")
+                    put("content", it)
+                })
+            }
         }
     }
 }
@@ -275,62 +257,211 @@ private fun projectTurnResultToResponsesInput(result: TurnResult): List<JsonObje
 private fun TurnItem.Reasoning.toOpenAiResponsesReasoningInput() = buildJsonObject {
     put("type", "reasoning")
     blackboard.string("openai.responses.reasoning_encrypted_content")?.let { put("encrypted_content", it) }
-    text?.takeIf { it.isNotBlank() }?.let { put("summary", buildJsonArray { add(buildJsonObject {
-        put("type", "summary_text")
-        put("text", it)
-    }) }) }
+    text?.takeIf { it.isNotBlank() }?.let {
+        put("summary", buildJsonArray {
+            add(buildJsonObject {
+                put("type", "summary_text")
+                put("text", it)
+            })
+        })
+    }
 }
 
-private suspend fun parseReceived(raw: JsonObject, providerRequest: ProviderTurnRequest<*>, observer: TurnObserver? = null): OpenAiResponsesReceived {
+private fun parseReceived(raw: JsonObject, providerRequest: ProviderTurnRequest<*>): OpenAiResponsesReceived {
     val output = raw.outputItems()
-
-    // 这里重创建了draft。如果本就是流式，有合流问题
-    val draft = TurnResultDraft(providerRequest.config.output, observer)
-
-    output.forEachIndexed { index, item ->
-        when (item.string("type")) {
-            "message" -> parseMessageItem(item, draft)
-            "function_call" -> parseFunctionCallItem(item, index, draft)
-            "reasoning" -> parseReasoningItem(item, draft)
-        }
-    }
-    raw.string("output_text")?.takeIf { it.isNotBlank() && draft.partial().items.none { item -> item is TurnItem.Content } }?.let { draft.appendContent(it) }
-
     val blackboard = raw.string("id")?.let { LlmBlackboard.Empty.with("openai.responses.response_id", it) } ?: LlmBlackboard.Empty
     val trace = TurnTrace(ProviderShape.OpenAiResponses, raw.string("model") ?: providerRequest.config.model, raw.string("status"), raw, blackboard)
-    return OpenAiResponsesReceived(output, draft.complete(parseOpenAiResponsesUsage(raw["usage"]?.jsonObjectOrNull()), trace, blackboard))
+    return OpenAiResponsesReceived(output, openAiResponsesToTurnResult(raw, providerRequest.config.output, parseOpenAiResponsesUsage(raw["usage"]?.jsonObjectOrNull()), trace, blackboard))
 }
 
-private suspend fun parseMessageItem(item: JsonObject, draft: TurnResultDraft) {
+private fun openAiResponsesToTurnResult(raw: JsonObject, output: OutputContract, usage: TokenUsage? = null, trace: TurnTrace = TurnTrace(), blackboard: LlmBlackboard = LlmBlackboard.Empty) = TurnResult(buildList {
+    raw.outputItems().forEachIndexed { index, item ->
+        when (item.string("type")) {
+            "message" -> addAll(openAiResponsesMessageItems(item, output))
+            "function_call" -> add(openAiResponsesFunctionCallItem(item, index))
+            "reasoning" -> openAiResponsesReasoningItem(item)?.let { add(it) }
+        }
+    }
+    raw.string("output_text")?.takeIf { it.isNotBlank() && none { item -> item is TurnItem.Content } }?.let { add(TurnItem.Content(it.toOutputBody(output))) }
+}, usage, trace, blackboard)
+
+private fun openAiResponsesMessageItems(item: JsonObject, output: OutputContract) = buildList {
     item["content"]?.jsonArrayOrNull().orEmpty().forEach { contentElement ->
         val content = contentElement.jsonObjectOrNull() ?: return@forEach
         when (content.string("type")) {
-            "output_text" -> draft.appendContent(content.string("text").orEmpty())
-            "refusal" -> draft.appendRefusal(content.string("refusal") ?: content.string("text"))
-            else -> content.string("text")?.let { draft.appendContent(it) }
+            "output_text" -> add(TurnItem.Content(content.string("text").orEmpty().toOutputBody(output)))
+            "refusal" -> add(TurnItem.Refusal(content.string("refusal") ?: content.string("text")))
+            else -> content.string("text")?.let { add(TurnItem.Content(it.toOutputBody(output))) }
         }
     }
 }
 
-private suspend fun parseFunctionCallItem(item: JsonObject, index: Int, draft: TurnResultDraft) {
-    val id = item.string("call_id") ?: item.string("id") ?: "call_$index"
-    val name = item.string("name") ?: "function"
-    draft.startTool(id, name)
-    draft.appendToolArguments(id, name, item.string("arguments").orEmpty())
-    draft.completeTool(id)
-}
+private fun openAiResponsesFunctionCallItem(item: JsonObject, index: Int) = TurnItem.ToolCall(item.string("call_id") ?: item.string("id") ?: "call_$index", item.string("name") ?: "function", item.string("arguments").orEmpty().toJsonObjectLenient())
 
-private suspend fun parseReasoningItem(item: JsonObject, draft: TurnResultDraft) {
+private fun openAiResponsesReasoningItem(item: JsonObject): TurnItem.Reasoning? {
     val blackboard = item.string("encrypted_content")?.let { LlmBlackboard.Empty.with("openai.responses.reasoning_encrypted_content", it) } ?: LlmBlackboard.Empty
     val summaries = item["summary"]?.jsonArrayOrNull().orEmpty().mapNotNull { it.jsonObjectOrNull()?.string("text") }
-    if (summaries.isEmpty()) {
-        if (!blackboard.isEmpty) draft.appendReasoning("", ReasoningKind.Opaque, blackboard)
-        return
-    }
-    summaries.forEachIndexed { index, text -> draft.appendReasoning(text, ReasoningKind.Summary, if (index == 0) blackboard else LlmBlackboard.Empty) }
+    if (summaries.isEmpty()) return if (!blackboard.isEmpty) TurnItem.Reasoning(null, ReasoningKind.Opaque, blackboard) else null
+    return TurnItem.Reasoning(summaries.joinToString("\n"), ReasoningKind.Summary, blackboard)
 }
 
 private fun JsonObject.outputItems() = this["output"]?.jsonArrayOrNull().orEmpty().mapNotNull { it.jsonObjectOrNull() }
+
+// Responses 流式 draft 维护原生 output items；completed response 到达时以服务端总和为准
+private class OpenAiResponsesStreamDraft(private val output: OutputContract, private val observer: TurnObserver?) {
+    private val items = mutableListOf<JsonObject>()
+    private val itemIds = mutableMapOf<String, String>()
+    private val itemIndexKeys = mutableMapOf<Int, String>()
+    private val completedObserverIds = mutableSetOf<String>()
+    private var nextObserverOrdinal = 0
+
+    suspend fun outputItemAdded(raw: JsonObject, item: JsonObject) {
+        val index = raw.int("output_index") ?: items.size
+        while (items.size <= index) items += buildJsonObject { put("type", "message") }
+        items[index] = item
+        val key = itemKey(raw, item, index)
+        itemIndexKeys[index] = key
+        startObserver(key, kindOf(item))
+    }
+
+    suspend fun delta(event: String, raw: JsonObject) {
+        val index = raw.int("output_index") ?: 0
+        while (items.size <= index) items += buildJsonObject { put("type", "message") }
+        val item = items[index]
+        val key = raw.openAiResponsesToolKey() ?: itemIndexKeys[index] ?: itemKey(raw, item, index)
+        itemIndexKeys[index] = key
+
+        when (event) {
+            "response.output_text.delta" -> {
+                startObserver(key, TurnItemKind.Content)
+                val delta = raw.string("delta").orEmpty()
+                items[index] = item.appendResponsesMessageContent("output_text", "text", delta)
+                if (delta.isNotEmpty()) observer?.onEvent(TurnEvent.ItemDelta(itemIds.getValue(key), TurnItemDelta.Text(delta)))
+            }
+
+            "response.refusal.delta" -> {
+                startObserver(key, TurnItemKind.Refusal)
+                val delta = raw.string("delta").orEmpty()
+                items[index] = item.appendResponsesMessageContent("refusal", "refusal", delta)
+                if (delta.isNotEmpty()) observer?.onEvent(TurnEvent.ItemDelta(itemIds.getValue(key), TurnItemDelta.Text(delta)))
+            }
+
+            "response.reasoning_text.delta", "response.reasoning.delta", "response.reasoning_summary_text.delta" -> {
+                startObserver(key, TurnItemKind.Reasoning)
+                val delta = raw.string("delta").orEmpty()
+                items[index] = item.appendResponsesReasoningSummary(delta)
+                if (delta.isNotEmpty()) observer?.onEvent(TurnEvent.ItemDelta(itemIds.getValue(key), TurnItemDelta.Text(delta)))
+            }
+
+            "response.function_call_arguments.delta" -> {
+                startObserver(key, TurnItemKind.ToolCall)
+                val delta = raw.string("delta").orEmpty()
+                items[index] = item.appendResponsesFunctionArguments(raw, delta)
+                if (delta.isNotEmpty()) observer?.onEvent(TurnEvent.ItemDelta(itemIds.getValue(key), TurnItemDelta.ToolArguments(delta)))
+            }
+        }
+    }
+
+    suspend fun complete(completedRaw: JsonObject?, providerRequest: ProviderTurnRequest<*>): OpenAiResponsesReceived {
+        val raw = completedRaw ?: syntheticResponse(providerRequest)
+        val received = parseReceived(raw, providerRequest)
+        completeObserver(received.result)
+        observer?.onEvent(TurnEvent.Completed(received.result))
+        return received
+    }
+
+    fun partial(providerRequest: ProviderTurnRequest<*>) = openAiResponsesToTurnResult(syntheticResponse(providerRequest), providerRequest.config.output, trace = TurnTrace(ProviderShape.OpenAiResponses, providerRequest.config.model))
+
+    private fun syntheticResponse(providerRequest: ProviderTurnRequest<*>) = buildJsonObject {
+        put("model", providerRequest.config.model)
+        put("status", "incomplete")
+        put("output", buildJsonArray { items.forEach { add(it.normalizedResponsesOutputItem()) } })
+    }
+
+    private suspend fun startObserver(key: String, kind: TurnItemKind) {
+        if (key in itemIds) return
+        val id = "item_${nextObserverOrdinal++}"
+        itemIds[key] = id
+        observer?.onEvent(TurnEvent.ItemStarted(id, kind))
+    }
+
+    private suspend fun completeObserver(result: TurnResult) = result.items.forEachIndexed { index, item ->
+        val key = itemIndexKeys[index] ?: index.toString()
+        val id = itemIds[key] ?: "item_${nextObserverOrdinal++}".also {
+            itemIds[key] = it
+            observer?.onEvent(TurnEvent.ItemStarted(it, item.kind()))
+        }
+
+        if (completedObserverIds.add(id)) observer?.onEvent(TurnEvent.ItemCompleted(id, item))
+    }
+
+    private fun itemKey(raw: JsonObject, item: JsonObject, index: Int) = listOfNotNull(raw.string("call_id"), raw.string("item_id"), item.string("call_id"), item.string("id"), raw.int("output_index")?.toString()).firstOrNull() ?: index.toString()
+    private fun kindOf(item: JsonObject) = when (item.string("type")) {
+        "function_call" -> TurnItemKind.ToolCall
+        "reasoning" -> TurnItemKind.Reasoning
+        else -> TurnItemKind.Content
+    }
+}
+
+private fun JsonObject.appendResponsesMessageContent(type: String, field: String, delta: String) = buildJsonObject {
+    val current = this@appendResponsesMessageContent["content"]?.jsonArrayOrNull().orEmpty()
+    put("type", string("type") ?: "message")
+    put("role", string("role") ?: "assistant")
+    put("content", buildJsonArray {
+        val targetIndex = current.indexOfLast { it.jsonObjectOrNull()?.string("type") == type }
+        current.forEachIndexed { index, element ->
+            val obj = element.jsonObjectOrNull()
+            if (index == targetIndex && obj != null) add(obj.withStringAppended(field, delta)) else add(element)
+        }
+        if (targetIndex < 0) add(buildJsonObject {
+            put("type", type)
+            put(field, delta)
+        })
+    })
+}
+
+private fun JsonObject.appendResponsesReasoningSummary(delta: String) = buildJsonObject {
+    this@appendResponsesReasoningSummary.forEach { (key, value) -> put(key, value) }
+    if (!containsKey("type")) put("type", "reasoning")
+    put("summary", buildJsonArray {
+        val current = this@appendResponsesReasoningSummary["summary"]?.jsonArrayOrNull().orEmpty()
+        if (current.isEmpty()) add(buildJsonObject {
+            put("type", "summary_text")
+            put("text", delta)
+        }) else current.forEachIndexed { index, element ->
+            val obj = element.jsonObjectOrNull()
+            if (index == current.lastIndex && obj != null) add(obj.withStringAppended("text", delta)) else add(element)
+        }
+    })
+}
+
+private fun JsonObject.appendResponsesFunctionArguments(raw: JsonObject, delta: String) = buildJsonObject {
+    put("type", "function_call")
+    put("call_id", string("call_id") ?: raw.string("call_id") ?: raw.string("item_id") ?: raw.int("output_index")?.let { "call_$it" } ?: "call")
+    put("name", string("name") ?: raw.string("name") ?: "function")
+    put("arguments", string("arguments").orEmpty() + delta)
+}
+
+private fun JsonObject.withStringAppended(field: String, delta: String) = buildJsonObject {
+    this@withStringAppended.forEach { (key, value) -> put(key, value) }
+    put(field, string(field).orEmpty() + delta)
+}
+
+private fun JsonObject.normalizedResponsesOutputItem() = when (string("type")) {
+    "function_call" -> buildJsonObject {
+        put("type", "function_call")
+        put("call_id", string("call_id") ?: string("id") ?: "call")
+        put("name", string("name") ?: "function")
+        put("arguments", string("arguments").orEmpty())
+    }
+
+    "reasoning" -> this
+    else -> buildJsonObject {
+        put("type", "message")
+        put("role", string("role") ?: "assistant")
+        put("content", this@normalizedResponsesOutputItem["content"]?.jsonArrayOrNull() ?: buildJsonArray {})
+    }
+}
 
 private fun openAiResponsesCompactionBlackboard(raw: JsonObject) = raw.string("id")?.let { LlmBlackboard.Empty.with("openai.responses.compaction_id", it) } ?: LlmBlackboard.Empty
 
@@ -362,6 +493,7 @@ private fun List<JsonObject>.latestOpenAiResponsesWaveRange(): OpenAiResponsesWa
             break
         }
     }
+
     if (promptIndex < 0) return null
     while (promptIndex > 0 && this[promptIndex - 1].isOpenAiResponsesPrompt()) promptIndex--
     return OpenAiResponsesWaveRange(promptIndex, endExclusive)
@@ -399,24 +531,24 @@ private fun JsonObject.isOpenAiResponsesToolish() = string("type")?.contains("ca
 
 private fun Iterable<JsonElement>.toJsonArray() = buildJsonArray { forEach { add(it) } }
 
-private fun openAiResponsesInputContent(parts: List<ContentPart>): JsonElement {
-    if (parts.all { it is ContentPart.Text }) return JsonPrimitive(parts.plainText())
-    return buildJsonArray {
-        parts.forEach { part ->
-            when (part) {
-                is ContentPart.Text -> add(buildJsonObject {
-                    put("type", "input_text")
-                    put("text", part.text)
-                })
-                is ContentPart.ImageUrl -> add(buildJsonObject {
-                    put("type", "input_image")
-                    put("image_url", part.url)
-                })
-                is ContentPart.ImageBase64 -> add(buildJsonObject {
-                    put("type", "input_image")
-                    put("image_url", "data:${part.mimeType};base64,${part.base64}")
-                })
-            }
+private fun openAiResponsesInputContent(parts: List<ContentPart>): JsonElement = if (parts.all { it is ContentPart.Text }) JsonPrimitive(parts.plainText())
+else buildJsonArray {
+    parts.forEach { part ->
+        when (part) {
+            is ContentPart.Text -> add(buildJsonObject {
+                put("type", "input_text")
+                put("text", part.text)
+            })
+
+            is ContentPart.ImageUrl -> add(buildJsonObject {
+                put("type", "input_image")
+                put("image_url", part.url)
+            })
+
+            is ContentPart.ImageBase64 -> add(buildJsonObject {
+                put("type", "input_image")
+                put("image_url", "data:${part.mimeType};base64,${part.base64}")
+            })
         }
     }
 }
@@ -458,9 +590,7 @@ private fun JsonObject.withOpenAiResponsesInternalStateOptions(config: Effective
 
 private fun openAiResponsesInternalInclude(config: EffectiveLlmCallConfig) = if (config.reasoning == ReasoningLevel.Off) emptyList() else listOf(JsonPrimitive("reasoning.encrypted_content"))
 
-private fun JsonObject.openAiResponsesCompactOptions() = buildJsonObject {
-    listOf("include", "metadata", "service_tier", "user").forEach { key -> this@openAiResponsesCompactOptions[key]?.let { put(key, it) } }
-}
+private fun JsonObject.openAiResponsesCompactOptions() = buildJsonObject { listOf("include", "metadata", "service_tier", "user").forEach { key -> this@openAiResponsesCompactOptions[key]?.let { put(key, it) } } }
 
 private fun LlmBlackboard.openAiResponsesLaneBlackboard() = onlyPrefixed("openai.").without("openai.responses.response_id")
 
@@ -471,10 +601,9 @@ private fun LlmProviderException.isOpenAiResponsesPreviousResponseUnsupported() 
 
 private fun JsonObject.openAiResponsesToolKey() = string("call_id") ?: string("item_id") ?: int("output_index")?.toString()
 
-private fun JsonObject.openAiResponsesToolKeys(item: JsonObject) = listOfNotNull(string("call_id"), string("item_id"), item.string("call_id"), item.string("id"), int("output_index")?.toString()).distinct()
-
 private fun parseOpenAiResponsesUsage(usage: JsonObject?): TokenUsage? {
     if (usage == null) return null
+
     val inputDetails = usage["input_tokens_details"]?.jsonObjectOrNull()
     val outputDetails = usage["output_tokens_details"]?.jsonObjectOrNull()
     return TokenUsage(usage.int("input_tokens"), usage.int("output_tokens"), usage.int("total_tokens"), inputDetails?.int("cached_tokens"), outputDetails?.int("reasoning_tokens"))

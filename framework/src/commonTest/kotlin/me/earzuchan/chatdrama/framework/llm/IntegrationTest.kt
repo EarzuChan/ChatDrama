@@ -29,9 +29,9 @@ class LlmApiIntegrationTest {
     @Test
     fun tempDemo() = runTest {
         // val (backend, model) = OpenAiLegacyBackend(OpenAiLegacyBackendConfig(DEEPSEEK_KEY, DEEPSEEK_BASE_URL)) to DEEPSEEK_MODEL_V4_PRO
-        val (backend, model) = OpenAiResponsesBackend(OpenAiResponsesBackendConfig(VANYO_OPENAI_KEY, "$VANYO_BASE_URL/v1")) to VANYO_MODEL_GPT5_5
+        // val (backend, model) = OpenAiResponsesBackend(OpenAiResponsesBackendConfig(VANYO_OPENAI_KEY, "$VANYO_BASE_URL/v1")) to VANYO_MODEL_GPT5_5
         // val (backend, model) = GeminiBackend(GeminiBackendConfig(GEMINI_KEY)) to GEMINI_MODEL_3_FLASH
-        // val (backend, model) = ClaudeBackend(ClaudeBackendConfig(OPUSRELAY_KEY, OPUSRELAY_BASE_URL)) to OPUSRELAY_MODEL_CLAUDE_CLAUDE_4_8
+        val (backend, model) = ClaudeBackend(ClaudeBackendConfig(OPUSRELAY_KEY, OPUSRELAY_BASE_URL)) to OPUSRELAY_MODEL_CLAUDE_CLAUDE_4_8
 
         val session = LlmSession(
             backend = backend,

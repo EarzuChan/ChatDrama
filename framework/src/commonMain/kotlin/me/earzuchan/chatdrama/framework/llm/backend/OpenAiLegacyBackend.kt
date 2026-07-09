@@ -29,17 +29,17 @@ class OpenAiLegacyBackend(private val config: OpenAiLegacyBackendConfig) : HttpP
             RequestMode.Static -> receiveStatic(providerRequest)
             is RequestMode.Streamed -> receiveStream(providerRequest, mode.observer)
         }
+
         return commitReceived(providerRequest, received)
     }
 
     private suspend fun receiveStatic(providerRequest: ProviderTurnRequest<OpenAiLegacyLaneB>) = parseOpenAiChatReceived(postJson(chatCompletionsUrl(), headers(), chatCompletionsBody(providerRequest, stream = false)), providerRequest)
 
     private suspend fun receiveStream(providerRequest: ProviderTurnRequest<OpenAiLegacyLaneB>, observer: TurnObserver?): OpenAiLegacyReceived {
-        val draft = TurnResultDraft(providerRequest.config.output, observer)
+        val draft = OpenAiLegacyAssistantMessageDraft(providerRequest.config.output, observer)
         var usage: TokenUsage? = null
         var finishReason: String? = null
         var model = providerRequest.config.model
-        val toolIndices = mutableMapOf<Int, Pair<String, String>>()
 
         try {
             postSse(chatCompletionsUrl(), headers(), chatCompletionsBody(providerRequest, stream = true)) { _, data ->
@@ -51,23 +51,9 @@ class OpenAiLegacyBackend(private val config: OpenAiLegacyBackendConfig) : HttpP
                 choice.string("finish_reason")?.let { finishReason = it }
                 val delta = choice["delta"]?.jsonObjectOrNull() ?: return@postSse
 
-                delta.appendOpenAiLegacyTextFieldsTo(draft)
-
-                delta["tool_calls"]?.jsonArrayOrNull().orEmpty().forEach { itemElement ->
-                    val item = itemElement.jsonObjectOrNull() ?: return@forEach
-                    val index = item.int("index") ?: 0
-                    val function = item["function"]?.jsonObjectOrNull()
-                    val existing = toolIndices[index]
-                    val id = item.string("id") ?: existing?.first ?: "call_$index"
-                    val name = function?.string("name") ?: existing?.second ?: "function"
-                    if (existing == null) draft.startTool(id, name)
-                    toolIndices[index] = id to name
-                    function?.string("arguments")?.let { draft.appendToolArguments(id, name, it) }
-                }
+                draft.delta(delta)
             }
-            toolIndices.values.forEach { (id, _) -> draft.completeTool(id) }
-            val result = draft.complete(usage, TurnTrace(shape, model, finishReason))
-            return OpenAiLegacyReceived(projectTurnResultToOpenAiLegacyMessage(result), result)
+            return draft.complete(usage, TurnTrace(shape, model, finishReason))
         } catch (throwable: Throwable) {
             throw LlmTurnException(throwable.message ?: "OpenAI legacy stream failed", throwable, draft.partial(usage, TurnTrace(shape, model, finishReason)))
         }
@@ -276,38 +262,154 @@ private fun openAiLegacyResponseFormat(output: OutputContract): JsonObject? = wh
 
 private fun deepSeekCompatibleThinking(reasoning: ReasoningLevel) = if (reasoning == ReasoningLevel.Off) null else buildJsonObject { put("type", "enabled") }
 
-private suspend fun parseOpenAiChatReceived(raw: JsonObject, providerRequest: ProviderTurnRequest<*>): OpenAiLegacyReceived {
-    val draft = TurnResultDraft(providerRequest.config.output)
+private fun parseOpenAiChatReceived(raw: JsonObject, providerRequest: ProviderTurnRequest<*>): OpenAiLegacyReceived {
     val choice = raw["choices"]?.jsonArrayOrNull()?.firstOrNull()?.jsonObjectOrNull()
     val message = choice?.get("message")?.jsonObjectOrNull()
-    message?.let { parseOpenAiLegacyMessageToDraft(it, draft) }
-    val result = draft.partial(parseOpenAiUsage(raw["usage"]?.jsonObjectOrNull()), TurnTrace(ProviderShape.OpenAiLegacy, raw.string("model") ?: providerRequest.config.model, choice?.string("finish_reason"), raw))
-    return OpenAiLegacyReceived(message?.normalizeOpenAiLegacyAssistantMessage(), result)
+    val native = message?.normalizeOpenAiLegacyAssistantMessage()
+    val trace = TurnTrace(ProviderShape.OpenAiLegacy, raw.string("model") ?: providerRequest.config.model, choice?.string("finish_reason"), raw)
+    return OpenAiLegacyReceived(native, openAiLegacyMessageToTurnResult(native, providerRequest.config.output, parseOpenAiUsage(raw["usage"]?.jsonObjectOrNull()), trace))
 }
 
-private suspend fun parseOpenAiLegacyMessageToDraft(message: JsonObject, draft: TurnResultDraft) {
-    message.appendOpenAiLegacyTextFieldsTo(draft)
+private fun openAiLegacyMessageToTurnResult(message: JsonObject?, output: OutputContract, usage: TokenUsage? = null, trace: TurnTrace = TurnTrace(), blackboard: LlmBlackboard = LlmBlackboard.Empty) = TurnResult(openAiLegacyMessageItems(message, output), usage, trace, blackboard)
 
-    message["tool_calls"]?.jsonArrayOrNull().orEmpty().forEachIndexed { index, itemElement ->
+private fun openAiLegacyMessageItems(message: JsonObject?, output: OutputContract) = buildList {
+    val reasoning = listOfNotNull(message?.string("reasoning_content"), message?.string("reasoning")).joinToString("").takeIf { it.isNotBlank() }
+    reasoning?.let { add(TurnItem.Reasoning(it, ReasoningKind.Raw)) }
+    message?.string("content")?.takeIf { it.isNotEmpty() }?.let { add(TurnItem.Content(it.toOutputBody(output))) }
+    message?.string("refusal")?.takeIf { it.isNotEmpty() }?.let { add(TurnItem.Refusal(it)) }
+    message?.get("tool_calls")?.jsonArrayOrNull().orEmpty().forEachIndexed { index, itemElement ->
         val item = itemElement.jsonObjectOrNull() ?: return@forEachIndexed
         val function = item["function"]?.jsonObjectOrNull() ?: return@forEachIndexed
-        val id = item.string("id") ?: "call_$index"
-        draft.startTool(id, function.string("name") ?: "function")
-        draft.appendToolArguments(id, function.string("name") ?: "function", function.string("arguments").orEmpty())
-        draft.completeTool(id)
+        add(TurnItem.ToolCall(item.string("id") ?: "call_$index", function.string("name") ?: "function", function.string("arguments").orEmpty().toJsonObjectLenient()))
     }
 }
 
-private suspend fun JsonObject.appendOpenAiLegacyTextFieldsTo(draft: TurnResultDraft) {
-    string("reasoning_content")?.let { draft.appendReasoning(it, ReasoningKind.Raw) }
-    string("reasoning")?.let { draft.appendReasoning(it, ReasoningKind.Raw) }
-    string("content")?.let { draft.appendContent(it) }
-    string("refusal")?.let { draft.appendRefusal(it) }
+// Legacy 流式只拼原生 assistant message，TurnResult 由该 message 转译而来
+private class OpenAiLegacyAssistantMessageDraft(private val output: OutputContract, private val observer: TurnObserver?) {
+    private val reasoning = StringBuilder()
+    private val content = StringBuilder()
+    private val refusal = StringBuilder()
+    private val toolCalls = mutableMapOf<Int, ToolCallDraft>()
+    private val completedIds = mutableSetOf<String>()
+    private var nextItemOrdinal = 0
+    private var reasoningItemId: String? = null
+    private var contentItemId: String? = null
+    private var refusalItemId: String? = null
+
+    suspend fun delta(delta: JsonObject) {
+        appendReasoning(delta.string("reasoning_content").orEmpty() + delta.string("reasoning").orEmpty())
+        appendContent(delta.string("content").orEmpty())
+        appendRefusal(delta.string("refusal").orEmpty())
+
+        delta["tool_calls"]?.jsonArrayOrNull().orEmpty().forEach { itemElement ->
+            val item = itemElement.jsonObjectOrNull() ?: return@forEach
+            val index = item.int("index") ?: 0
+            val tool = toolCalls.getOrPut(index) { ToolCallDraft(newItemId(), index) }
+            tool.delta(item)
+        }
+    }
+
+    suspend fun complete(usage: TokenUsage?, trace: TurnTrace): OpenAiLegacyReceived {
+        val native = message()
+        val result = openAiLegacyMessageToTurnResult(native, output, usage, trace)
+        completeObserver(result)
+        observer?.onEvent(TurnEvent.Completed(result))
+        return OpenAiLegacyReceived(native, result)
+    }
+
+    fun partial(usage: TokenUsage? = null, trace: TurnTrace = TurnTrace()) = openAiLegacyMessageToTurnResult(message(), output, usage, trace)
+
+    private suspend fun appendReasoning(delta: String) {
+        if (delta.isEmpty()) return
+
+        val id = reasoningItemId ?: newItemId().also {
+            reasoningItemId = it
+            observer?.onEvent(TurnEvent.ItemStarted(it, TurnItemKind.Reasoning))
+        }
+
+        reasoning.append(delta)
+        observer?.onEvent(TurnEvent.ItemDelta(id, TurnItemDelta.Text(delta)))
+    }
+
+    private suspend fun appendContent(delta: String) {
+        if (delta.isEmpty()) return
+        val id = contentItemId ?: newItemId().also {
+            contentItemId = it
+            observer?.onEvent(TurnEvent.ItemStarted(it, TurnItemKind.Content))
+        }
+        content.append(delta)
+        observer?.onEvent(TurnEvent.ItemDelta(id, TurnItemDelta.Text(delta)))
+    }
+
+    private suspend fun appendRefusal(delta: String) {
+        if (delta.isEmpty()) return
+        val id = refusalItemId ?: newItemId().also {
+            refusalItemId = it
+            observer?.onEvent(TurnEvent.ItemStarted(it, TurnItemKind.Refusal))
+        }
+        refusal.append(delta)
+        observer?.onEvent(TurnEvent.ItemDelta(id, TurnItemDelta.Text(delta)))
+    }
+
+    private fun message() = buildJsonObject {
+        put("role", "assistant")
+        if (content.isNotEmpty()) put("content", content.toString()) else put("content", JsonNull)
+        if (reasoning.isNotEmpty()) put("reasoning_content", reasoning.toString())
+        if (refusal.isNotEmpty()) put("refusal", refusal.toString())
+        if (toolCalls.isNotEmpty()) put("tool_calls", buildJsonArray { toolCalls.keys.sorted().forEach { index -> add(toolCalls.getValue(index).toJson()) } })
+    }.normalizeOpenAiLegacyAssistantMessage()
+
+    private suspend fun completeObserver(result: TurnResult) = result.items.forEach { item ->
+        val id = when (item) {
+            is TurnItem.Reasoning -> reasoningItemId
+            is TurnItem.Content -> contentItemId
+            is TurnItem.Refusal -> refusalItemId
+            is TurnItem.ToolCall -> toolCalls.values.firstOrNull { it.callId == item.id }?.itemId
+        } ?: newItemId().also { observer?.onEvent(TurnEvent.ItemStarted(it, item.kind())) }
+
+        if (completedIds.add(id)) observer?.onEvent(TurnEvent.ItemCompleted(id, item))
+    }
+
+    private fun newItemId() = "item_${nextItemOrdinal++}"
+
+    private inner class ToolCallDraft(val itemId: String, index: Int) {
+        var callId = "call_$index"
+        var type = "function"
+        var name = "function"
+        private val arguments = StringBuilder()
+        private var started = false
+
+        suspend fun delta(item: JsonObject) {
+            item.string("id")?.let { callId = it }
+            item.string("type")?.let { type = it }
+            item["function"]?.jsonObjectOrNull()?.string("name")?.let { name = it }
+
+            if (!started) {
+                started = true
+                observer?.onEvent(TurnEvent.ItemStarted(itemId, TurnItemKind.ToolCall))
+            }
+
+            item["function"]?.jsonObjectOrNull()?.string("arguments")?.let {
+                arguments.append(it)
+                if (it.isNotEmpty()) observer?.onEvent(TurnEvent.ItemDelta(itemId, TurnItemDelta.ToolArguments(it)))
+            }
+        }
+
+        fun toJson() = buildJsonObject {
+            put("id", callId)
+            put("type", type)
+            put("function", buildJsonObject {
+                put("name", name)
+                put("arguments", arguments.toString())
+            })
+        }
+    }
 }
 
 private fun JsonObject.normalizeOpenAiLegacyAssistantMessage() = buildJsonObject {
     put("role", string("role") ?: "assistant")
-    string("content")?.let { put("content", it) } ?: put("content", JsonNull)
+    val content = string("content")
+    if (content != null) put("content", content) else put("content", JsonNull)
     string("reasoning_content")?.let { put("reasoning_content", it) }
     string("reasoning")?.let { put("reasoning", it) }
     string("refusal")?.let { put("refusal", it) }

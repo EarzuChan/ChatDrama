@@ -40,32 +40,17 @@ class GeminiBackend(private val config: GeminiBackendConfig) : HttpProviderBacke
     private suspend fun receiveStatic(providerRequest: ProviderTurnRequest<GeminiLaneB>) = parseGeminiReceived(postJson(geminiUrl(providerRequest.config.model, stream = false), headers(), geminiBody(providerRequest)), providerRequest)
 
     private suspend fun receiveStream(providerRequest: ProviderTurnRequest<GeminiLaneB>, observer: TurnObserver?): GeminiReceived {
-        val draft = TurnResultDraft(providerRequest.config.output, observer)
-        val native = GeminiNativeContentBuilder()
-        var usage: TokenUsage? = null
-        var finishReason: String? = null
-        var responseId: String? = null
-        var toolOrdinal = 0
+        val draft = GeminiGenerateContentResponseDraft(providerRequest.config.output, observer)
 
         try {
             postSse(geminiUrl(providerRequest.config.model, stream = true), headers(), geminiBody(providerRequest)) { _, data ->
                 val raw = parseJsonElementOrNull(data)?.jsonObjectOrNull() ?: return@postSse
-                responseId = raw.string("responseId") ?: responseId
-                parseGeminiUsage(raw["usageMetadata"]?.jsonObjectOrNull())?.let { usage = it }
-
-                val candidate = raw.geminiPrimaryCandidate() ?: return@postSse
-                candidate.string("finishReason")?.let { finishReason = it }
-                candidate.geminiCandidateParts().forEach { part ->
-                    native.add(part)
-                    parseGeminiPartToDraft(part, draft) { name -> "gemini:$name:${toolOrdinal++}" }
-                }
+                draft.chunk(raw)
             }
 
-            val blackboard = responseId?.let { LlmBlackboard.Empty.with("gemini.response_id", it) } ?: LlmBlackboard.Empty
-            val result = draft.complete(usage, TurnTrace(shape, providerRequest.config.model, finishReason, blackboard = blackboard), blackboard)
-            return GeminiReceived(native.contentOrNull(), result)
+            return draft.complete(providerRequest.config.model)
         } catch (throwable: Throwable) {
-            throw LlmTurnException(throwable.message ?: "Gemini stream failed", throwable, draft.partial(usage, TurnTrace(shape, providerRequest.config.model, finishReason)))
+            throw LlmTurnException(throwable.message ?: "Gemini stream failed", throwable, draft.partial(providerRequest.config.model))
         }
     }
 
@@ -187,16 +172,25 @@ private fun projectTurnResultToGeminiContent(result: TurnResult, textualizedTool
 
 private fun TurnResult.hasGeminiNativeToolChain() = isFrom(ProviderShape.Gemini) && items.filterIsInstance<TurnItem.ToolCall>().all { it.blackboard.string("gemini.thought_signature") != null }
 
-private suspend fun parseGeminiReceived(raw: JsonObject, providerRequest: ProviderTurnRequest<*>): GeminiReceived {
-    val draft = TurnResultDraft(providerRequest.config.output)
+private fun parseGeminiReceived(raw: JsonObject, providerRequest: ProviderTurnRequest<*>): GeminiReceived {
     val candidate = raw.geminiPrimaryCandidate()
     val nativeContent = candidate?.geminiCandidateContent()
-
-    nativeContent?.geminiContentParts().orEmpty().forEachIndexed { index, part -> parseGeminiPartToDraft(part, draft) { name -> "gemini:$name:$index" } }
-
     val blackboard = raw.string("responseId")?.let { LlmBlackboard.Empty.with("gemini.response_id", it) } ?: LlmBlackboard.Empty
     val trace = TurnTrace(ProviderShape.Gemini, providerRequest.config.model, candidate?.string("finishReason"), raw, blackboard)
-    return GeminiReceived(nativeContent, draft.complete(parseGeminiUsage(raw["usageMetadata"]?.jsonObjectOrNull()), trace, blackboard))
+    return GeminiReceived(nativeContent, geminiResponseToTurnResult(raw, providerRequest.config.model, providerRequest.config.output, trace, blackboard))
+}
+
+private fun geminiResponseToTurnResult(raw: JsonObject, model: String, output: OutputContract, trace: TurnTrace = TurnTrace(ProviderShape.Gemini, model), blackboard: LlmBlackboard = LlmBlackboard.Empty) = TurnResult(geminiResponseItems(raw, output), parseGeminiUsage(raw["usageMetadata"]?.jsonObjectOrNull()), trace, blackboard)
+
+private fun geminiResponseItems(raw: JsonObject, output: OutputContract) = buildList {
+    raw.geminiPrimaryCandidate()?.geminiCandidateContent()?.geminiContentParts().orEmpty().forEachIndexed { index, part ->
+        part.geminiTextItem(output)?.let { add(it) }
+        part["functionCall"]?.jsonObjectOrNull()?.let { functionCall ->
+            val name = functionCall.string("name") ?: "function"
+            val id = functionCall.string("id") ?: "gemini:$name:$index"
+            add(TurnItem.ToolCall(id, name, functionCall["args"]?.jsonObjectOrNull() ?: emptyJsonObject(), part.geminiThoughtBlackboard()))
+        }
+    }
 }
 
 private fun JsonObject.geminiPrimaryCandidate() = this["candidates"]?.jsonArrayOrNull()?.firstOrNull()?.jsonObjectOrNull()
@@ -216,35 +210,92 @@ private fun JsonObject.normalizeGeminiModelContent(): JsonObject? {
     }
 }
 
-private suspend fun parseGeminiPartToDraft(part: JsonObject, draft: TurnResultDraft, fallbackToolId: (String) -> String) {
-    part.appendGeminiTextPartTo(draft)
-    part["functionCall"]?.jsonObjectOrNull()?.let { functionCall ->
-        val name = functionCall.string("name") ?: "function"
-        val id = functionCall.string("id") ?: fallbackToolId(name)
-        draft.startTool(id, name, part.geminiThoughtBlackboard())
-        draft.appendToolArguments(id, name, (functionCall["args"]?.jsonObjectOrNull() ?: emptyJsonObject()).toString())
-        draft.completeTool(id)
+// Gemini 流式 draft 以完整 GenerateContentResponse 为原生事实源
+private class GeminiGenerateContentResponseDraft(private val output: OutputContract, private val observer: TurnObserver?) {
+    private val parts = mutableListOf<JsonObject>()
+    private var usage: JsonObject? = null
+    private var finishReason: String? = null
+    private var responseId: String? = null
+    private var nextObserverOrdinal = 0
+    private val itemIds = mutableMapOf<Int, String>()
+    private val completedIds = mutableSetOf<String>()
+
+    suspend fun chunk(raw: JsonObject) {
+        responseId = raw.string("responseId") ?: responseId
+        raw["usageMetadata"]?.jsonObjectOrNull()?.let { usage = it }
+        raw.geminiPrimaryCandidate()?.string("finishReason")?.let { finishReason = it }
+        raw.geminiPrimaryCandidate()?.geminiCandidateParts().orEmpty().forEach { part -> addPart(part) }
+    }
+
+    suspend fun complete(model: String): GeminiReceived {
+        val raw = response()
+        val blackboard = responseId?.let { LlmBlackboard.Empty.with("gemini.response_id", it) } ?: LlmBlackboard.Empty
+        val trace = TurnTrace(ProviderShape.Gemini, model, finishReason, raw, blackboard)
+        val result = geminiResponseToTurnResult(raw, model, output, trace, blackboard)
+        completeObserver(result)
+        observer?.onEvent(TurnEvent.Completed(result))
+        return GeminiReceived(raw.geminiPrimaryCandidate()?.geminiCandidateContent(), result)
+    }
+
+    fun partial(model: String) = geminiResponseToTurnResult(response(), model, output, TurnTrace(ProviderShape.Gemini, model, finishReason), responseId?.let { LlmBlackboard.Empty.with("gemini.response_id", it) } ?: LlmBlackboard.Empty)
+
+    private suspend fun addPart(part: JsonObject) {
+        val index = parts.lastIndex.takeIf { it >= 0 && parts[it].canMergeGeminiTextDelta(part) }
+
+        if (index != null) {
+            parts[index] = parts[index].mergeGeminiTextDelta(part)
+            emitDelta(index, part)
+        } else {
+            parts += part
+            val newIndex = parts.lastIndex
+            startObserver(newIndex, part)
+            emitDelta(newIndex, part)
+        }
+    }
+
+    private fun response() = buildJsonObject {
+        responseId?.let { put("responseId", it) }
+        put("candidates", buildJsonArray {
+            add(buildJsonObject {
+                finishReason?.let { put("finishReason", it) }
+                put("content", content())
+            })
+        })
+        usage?.let { put("usageMetadata", it) }
+    }
+
+    private fun content() = buildJsonObject {
+        put("role", "model")
+        put("parts", JsonArray(parts))
+    }
+
+    private suspend fun startObserver(index: Int, part: JsonObject) {
+        val id = itemIds.getOrPut(index) { "item_${nextObserverOrdinal++}" }
+        val kind = if (part["functionCall"] != null) TurnItemKind.ToolCall else if (part.boolean("thought") == true) TurnItemKind.Reasoning else TurnItemKind.Content
+        observer?.onEvent(TurnEvent.ItemStarted(id, kind))
+    }
+
+    private suspend fun emitDelta(index: Int, part: JsonObject) {
+        val id = itemIds.getValue(index)
+        part.string("text")?.takeIf { it.isNotEmpty() }?.let { observer?.onEvent(TurnEvent.ItemDelta(id, TurnItemDelta.Text(it))) }
+        part["functionCall"]?.jsonObjectOrNull()?.get("args")?.jsonObjectOrNull()?.toString()?.takeIf { it != "{}" }?.let { observer?.onEvent(TurnEvent.ItemDelta(id, TurnItemDelta.ToolArguments(it))) }
+    }
+
+    private suspend fun completeObserver(result: TurnResult) = result.items.forEachIndexed { index, item ->
+        val id = itemIds[index] ?: "item_${nextObserverOrdinal++}".also { observer?.onEvent(TurnEvent.ItemStarted(it, item.kind())) }
+        if (completedIds.add(id)) observer?.onEvent(TurnEvent.ItemCompleted(id, item))
     }
 }
 
-private class GeminiNativeContentBuilder {
-    private val parts = mutableListOf<JsonObject>()
+private fun JsonObject.geminiTextItem(output: OutputContract): TurnItem? {
+    val blackboard = geminiThoughtBlackboard()
+    val text = string("text")
 
-    fun add(part: JsonObject) {
-        val last = parts.lastOrNull()
-        if (last != null && last.canMergeGeminiTextDelta(part)) {
-            parts[parts.lastIndex] = last.mergeGeminiTextDelta(part)
-            return
-        }
-        parts += part
-    }
-
-    fun contentOrNull(): JsonObject? {
-        if (parts.isEmpty()) return null
-        return buildJsonObject {
-            put("role", "model")
-            put("parts", JsonArray(parts))
-        }
+    return when {
+        !text.isNullOrEmpty() && boolean("thought") == true -> TurnItem.Reasoning(text, blackboard = blackboard)
+        !text.isNullOrEmpty() -> TurnItem.Content(text.toOutputBody(output))
+        !blackboard.isEmpty -> TurnItem.Reasoning(null, ReasoningKind.Opaque, blackboard)
+        else -> null
     }
 }
 
@@ -401,18 +452,8 @@ private fun geminiThinkingConfig(reasoning: ReasoningLevel): JsonObject? = when 
     }
 }
 
-private fun parseGeminiUsage(usage: JsonObject?): TokenUsage? {
-    if (usage == null) return null
-    return TokenUsage(usage.int("promptTokenCount"), usage.int("candidatesTokenCount"), usage.int("totalTokenCount"), usage.int("cachedContentTokenCount"), usage.int("thoughtsTokenCount"))
-}
-
-private suspend fun JsonObject.appendGeminiTextPartTo(draft: TurnResultDraft) {
-    val blackboard = geminiThoughtBlackboard()
-    val text = string("text")
-    if (!text.isNullOrEmpty()) {
-        if (boolean("thought") == true) draft.appendReasoning(text, blackboard = blackboard) else draft.appendContent(text)
-    } else if (!blackboard.isEmpty) draft.appendReasoning("", ReasoningKind.Opaque, blackboard)
-}
+private fun parseGeminiUsage(usage: JsonObject?) = if (usage == null) null
+else TokenUsage(usage.int("promptTokenCount"), usage.int("candidatesTokenCount"), usage.int("totalTokenCount"), usage.int("cachedContentTokenCount"), usage.int("thoughtsTokenCount"))
 
 private fun JsonObject.geminiThoughtBlackboard() = string("thoughtSignature")?.let { LlmBlackboard.Empty.with("gemini.thought_signature", it) } ?: LlmBlackboard.Empty
 

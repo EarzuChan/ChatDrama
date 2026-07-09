@@ -4,7 +4,7 @@ import kotlinx.serialization.json.*
 import me.earzuchan.chatdrama.framework.llm.*
 import me.earzuchan.chatdrama.framework.llm.misc.*
 
-private const val CLAUDE_PROTOCOL_MAX_OUTPUT_TOKENS = 8192 // 128000 // CLAUDE 必填这一块，128k有感觉吗。8192是我没钱了省钱临时搞一下
+private const val CLAUDE_PROTOCOL_MAX_OUTPUT_TOKENS = 128000 // CLAUDE 必填这一块，128k有感觉吗
 
 data class ClaudeBackendConfig(val apiKey: String, val baseUrl: String = "https://api.anthropic.com", val anthropicVersion: String = "2023-06-01", val extraHeaders: Map<String, String> = emptyMap())
 
@@ -37,8 +37,7 @@ class ClaudeBackend(private val config: ClaudeBackendConfig) : HttpProviderBacke
     private suspend fun receiveStatic(providerRequest: ProviderTurnRequest<ClaudeLaneB>) = parseClaudeReceived(postJson(messagesUrl(), headers(), claudeBody(providerRequest, stream = false)), providerRequest)
 
     private suspend fun receiveStream(providerRequest: ProviderTurnRequest<ClaudeLaneB>, observer: TurnObserver?): ClaudeReceived {
-        val draft = TurnResultDraft(providerRequest.config.output, observer)
-        val native = ClaudeNativeContentBuilder()
+        val draft = ClaudeMessageDraft(providerRequest.config.output, observer)
         var usage: TokenUsage? = null
         var finishReason: String? = null
         var messageId: String? = null
@@ -56,21 +55,16 @@ class ClaudeBackend(private val config: ClaudeBackendConfig) : HttpProviderBacke
                     "content_block_start" -> {
                         val index = raw.int("index") ?: 0
                         val block = raw["content_block"]?.jsonObjectOrNull() ?: return@postSse
-                        native.start(index, block)
-                        parseClaudeContentBlockStartToDraft(index, block, draft)
+                        draft.start(index, block)
                     }
 
                     "content_block_delta" -> {
                         val index = raw.int("index") ?: 0
                         val delta = raw["delta"]?.jsonObjectOrNull() ?: return@postSse
-                        native.delta(index, delta)
-                        parseClaudeContentBlockDeltaToDraft(index, delta, native.toolIdentity(index), draft)
+                        draft.delta(index, delta)
                     }
 
-                    "content_block_stop" -> {
-                        val index = raw.int("index") ?: 0
-                        native.toolIdentity(index)?.first?.let { draft.completeTool(it) }
-                    }
+                    "content_block_stop" -> draft.stop(raw.int("index") ?: 0)
 
                     "message_delta" -> {
                         raw["usage"]?.jsonObjectOrNull()?.let { usage = parseClaudeUsage(it) }
@@ -81,8 +75,7 @@ class ClaudeBackend(private val config: ClaudeBackendConfig) : HttpProviderBacke
 
             val blackboard = messageId?.let { LlmBlackboard.Empty.with("claude.messages.message_id", it) } ?: LlmBlackboard.Empty
             val trace = TurnTrace(shape, model, finishReason, blackboard = blackboard)
-            val result = draft.complete(usage, trace, blackboard)
-            return ClaudeReceived(native.messageOrNull(), result)
+            return draft.complete(messageId, model, finishReason, usage, trace, blackboard)
         } catch (throwable: Throwable) {
             throw LlmTurnException(throwable.message ?: "Claude stream failed", throwable, draft.partial(usage, TurnTrace(shape, model, finishReason)))
         }
@@ -201,91 +194,117 @@ private fun projectTurnResultToClaudeMessage(result: TurnResult) = buildJsonObje
 
 private fun TurnResult.hasClaudeNativeThinking() = isFrom(ProviderShape.Claude) && items.filterIsInstance<TurnItem.Reasoning>().all { (it.kind == ReasoningKind.Redacted && it.blackboard.string("claude.messages.redacted_thinking") != null) || (it.kind != ReasoningKind.Redacted && it.blackboard.string("claude.messages.thinking_signature") != null) }
 
-private suspend fun parseClaudeReceived(raw: JsonObject, providerRequest: ProviderTurnRequest<*>): ClaudeReceived {
-    val draft = TurnResultDraft(providerRequest.config.output)
+private fun parseClaudeReceived(raw: JsonObject, providerRequest: ProviderTurnRequest<*>): ClaudeReceived {
     val content = raw["content"]?.jsonArrayOrNull() ?: JsonArray(emptyList())
-
-    content.forEachIndexed { index, itemElement ->
-        val item = itemElement.jsonObjectOrNull() ?: return@forEachIndexed
-        parseClaudeNativeBlockToDraft(index, item, draft)
-    }
-
+    val native = claudeNativeAssistantMessage(content)
     val blackboard = raw.string("id")?.let { LlmBlackboard.Empty.with("claude.messages.message_id", it) } ?: LlmBlackboard.Empty
     val trace = TurnTrace(ProviderShape.Claude, raw.string("model") ?: providerRequest.config.model, raw.string("stop_reason"), raw, blackboard)
-    return ClaudeReceived(claudeNativeAssistantMessage(content), draft.complete(parseClaudeUsage(raw["usage"]?.jsonObjectOrNull()), trace, blackboard))
+    return ClaudeReceived(native, claudeMessageToTurnResult(native, providerRequest.config.output, parseClaudeUsage(raw["usage"]?.jsonObjectOrNull()), trace, blackboard))
 }
 
-private suspend fun parseClaudeNativeBlockToDraft(index: Int, item: JsonObject, draft: TurnResultDraft) {
-    when (item.string("type")) {
-        "text" -> draft.appendContent(item.string("text").orEmpty())
-        "thinking" -> draft.appendReasoning(item.string("thinking").orEmpty(), ReasoningKind.Summary, item.string("signature")?.let { LlmBlackboard.Empty.with("claude.messages.thinking_signature", it) } ?: LlmBlackboard.Empty)
-        "redacted_thinking" -> draft.appendReasoning("", ReasoningKind.Redacted, item.string("data")?.let { LlmBlackboard.Empty.with("claude.messages.redacted_thinking", it) } ?: LlmBlackboard.Empty)
-        "tool_use" -> {
-            val id = item.string("id") ?: "tool_$index"
-            val name = item.string("name") ?: "function"
-            draft.startTool(id, name)
-            draft.appendToolArguments(id, name, (item["input"]?.jsonObjectOrNull() ?: emptyJsonObject()).toString())
-            draft.completeTool(id)
+private fun claudeMessageToTurnResult(message: JsonObject?, output: OutputContract, usage: TokenUsage? = null, trace: TurnTrace = TurnTrace(), blackboard: LlmBlackboard = LlmBlackboard.Empty) = TurnResult(claudeMessageItems(message, output), usage, trace, blackboard)
+
+private fun claudeMessageItems(message: JsonObject?, output: OutputContract) = buildList {
+    message?.get("content")?.jsonArrayOrNull().orEmpty().forEachIndexed { index, itemElement ->
+        val item = itemElement.jsonObjectOrNull() ?: return@forEachIndexed
+        when (item.string("type")) {
+            "text" -> add(TurnItem.Content(item.string("text").orEmpty().toOutputBody(output)))
+            "thinking" -> add(TurnItem.Reasoning(item.string("thinking").orEmpty(), ReasoningKind.Summary, item.string("signature")?.let { LlmBlackboard.Empty.with("claude.messages.thinking_signature", it) } ?: LlmBlackboard.Empty))
+            "redacted_thinking" -> add(TurnItem.Reasoning(null, ReasoningKind.Redacted, item.string("data")?.let { LlmBlackboard.Empty.with("claude.messages.redacted_thinking", it) } ?: LlmBlackboard.Empty))
+            "tool_use" -> add(TurnItem.ToolCall(item.string("id") ?: "tool_$index", item.string("name") ?: "function", item["input"]?.jsonObjectOrNull() ?: emptyJsonObject()))
         }
     }
 }
 
-private suspend fun parseClaudeContentBlockStartToDraft(index: Int, block: JsonObject, draft: TurnResultDraft) {
-    when (block.string("type")) {
-        "thinking" -> block.string("thinking")?.let { draft.appendReasoning(it) }
-        "redacted_thinking" -> draft.appendReasoning("", ReasoningKind.Redacted, block.string("data")?.let { LlmBlackboard.Empty.with("claude.messages.redacted_thinking", it) } ?: LlmBlackboard.Empty)
-        "tool_use" -> draft.startTool(block.string("id") ?: "tool_$index", block.string("name") ?: "function")
-        "text" -> block.string("text")?.let { draft.appendContent(it) }
-    }
-}
-
-private suspend fun parseClaudeContentBlockDeltaToDraft(index: Int, delta: JsonObject, tool: Pair<String, String>?, draft: TurnResultDraft) {
-    when (delta.string("type")) {
-        "text_delta" -> draft.appendContent(delta.string("text").orEmpty())
-        "thinking_delta" -> draft.appendReasoning(delta.string("thinking").orEmpty())
-        "signature_delta" -> draft.appendReasoning("", blackboard = delta.string("signature")?.let { LlmBlackboard.Empty.with("claude.messages.thinking_signature", it) } ?: LlmBlackboard.Empty)
-        "input_json_delta" -> {
-            val (id, name) = tool ?: ("tool_$index" to "function")
-            draft.appendToolArguments(id, name, delta.string("partial_json").orEmpty())
-        }
-    }
-}
-
-private class ClaudeNativeContentBuilder {
+// Claude 流式 draft 只维护 native message blocks，并从 blocks 派生统一 observer/result。
+private class ClaudeMessageDraft(private val output: OutputContract, private val observer: TurnObserver?) {
     private val blocks = mutableMapOf<Int, Block>()
+    private val completedIds = mutableSetOf<String>()
+    private var nextFallbackOrdinal = 0
 
-    fun start(index: Int, block: JsonObject) {
-        blocks[index] = Block(block)
+    suspend fun start(index: Int, block: JsonObject) {
+        blocks[index] = Block(index, block)
+        blocks[index]?.startObserver()
     }
 
-    fun delta(index: Int, delta: JsonObject) {
-        val block = blocks.getOrPut(index) { Block(buildJsonObject { put("type", "text") }) }
+    suspend fun delta(index: Int, delta: JsonObject) {
+        val block = blocks.getOrPut(index) { Block(index, buildJsonObject { put("type", "text") }) }
         block.delta(delta)
     }
 
-    fun toolIdentity(index: Int) = blocks[index]?.toolIdentity()
-
-    fun messageOrNull(): JsonObject? {
-        if (blocks.isEmpty()) return null
-        return claudeNativeAssistantMessage(JsonArray(blocks.keys.sorted().mapNotNull { blocks[it]?.toJson() }))
+    suspend fun stop(index: Int) {
+        blocks[index]?.completeObserver()
     }
 
-    private class Block(start: JsonObject) {
+    suspend fun complete(messageId: String?, model: String, finishReason: String?, usage: TokenUsage?, trace: TurnTrace, blackboard: LlmBlackboard): ClaudeReceived {
+        val native = message()
+        val result = claudeMessageToTurnResult(native, output, usage, trace, blackboard)
+        result.items.forEachIndexed { index, item -> completeFallbackObserver(index, item) }
+        observer?.onEvent(TurnEvent.Completed(result))
+        return ClaudeReceived(native, result)
+    }
+
+    fun partial(usage: TokenUsage? = null, trace: TurnTrace = TurnTrace()) = claudeMessageToTurnResult(message(), output, usage, trace)
+
+    private fun message() = claudeNativeAssistantMessage(JsonArray(blocks.keys.sorted().mapNotNull { blocks[it]?.toJson() }))
+
+    private suspend fun completeFallbackObserver(index: Int, item: TurnItem) {
+        val block = blocks[index]
+        if (block != null && block.observerItemId != null) return
+        val id = block?.observerItemId ?: "item_${nextFallbackOrdinal++}"
+
+        if (completedIds.add(id)) {
+            observer?.onEvent(TurnEvent.ItemStarted(id, item.kind()))
+            observer?.onEvent(TurnEvent.ItemCompleted(id, item))
+        }
+    }
+
+    private inner class Block(private val index: Int, start: JsonObject) {
         private val values = start.toMutableMap()
         private val inputJson = StringBuilder()
+        var observerItemId: String? = null
+            private set
 
-        fun delta(delta: JsonObject) {
+        suspend fun startObserver() {
+            val kind = when (values["type"]?.jsonPrimitiveOrNull()?.contentOrNull) {
+                "thinking", "redacted_thinking" -> TurnItemKind.Reasoning
+                "tool_use" -> TurnItemKind.ToolCall
+                else -> TurnItemKind.Content
+            }
+
+            observerItemId = observerItemId ?: "item_$index"
+            observer?.onEvent(TurnEvent.ItemStarted(observerItemId!!, kind))
+            values["text"]?.jsonPrimitiveOrNull()?.contentOrNull?.takeIf { it.isNotEmpty() }?.let { observer?.onEvent(TurnEvent.ItemDelta(observerItemId!!, TurnItemDelta.Text(it))) }
+            values["thinking"]?.jsonPrimitiveOrNull()?.contentOrNull?.takeIf { it.isNotEmpty() }?.let { observer?.onEvent(TurnEvent.ItemDelta(observerItemId!!, TurnItemDelta.Text(it))) }
+        }
+
+        suspend fun delta(delta: JsonObject) {
+            startObserver()
+
             when (delta.string("type")) {
-                "text_delta" -> values["text"] = JsonPrimitive((values["text"]?.jsonPrimitiveOrNull()?.contentOrNull ?: "") + delta.string("text").orEmpty())
-                "thinking_delta" -> values["thinking"] = JsonPrimitive((values["thinking"]?.jsonPrimitiveOrNull()?.contentOrNull ?: "") + delta.string("thinking").orEmpty())
+                "text_delta" -> {
+                    val text = delta.string("text").orEmpty()
+                    values["text"] = JsonPrimitive((values["text"]?.jsonPrimitiveOrNull()?.contentOrNull ?: "") + text)
+                    if (text.isNotEmpty()) observer?.onEvent(TurnEvent.ItemDelta(observerItemId!!, TurnItemDelta.Text(text)))
+                }
+                "thinking_delta" -> {
+                    val text = delta.string("thinking").orEmpty()
+                    values["thinking"] = JsonPrimitive((values["thinking"]?.jsonPrimitiveOrNull()?.contentOrNull ?: "") + text)
+                    if (text.isNotEmpty()) observer?.onEvent(TurnEvent.ItemDelta(observerItemId!!, TurnItemDelta.Text(text)))
+                }
                 "signature_delta" -> delta.string("signature")?.let { values["signature"] = JsonPrimitive(it) }
-                "input_json_delta" -> inputJson.append(delta.string("partial_json").orEmpty())
+                "input_json_delta" -> {
+                    val text = delta.string("partial_json").orEmpty()
+                    inputJson.append(text)
+                    if (text.isNotEmpty()) observer?.onEvent(TurnEvent.ItemDelta(observerItemId!!, TurnItemDelta.ToolArguments(text)))
+                }
             }
         }
 
-        fun toolIdentity(): Pair<String, String>? {
-            if (values["type"]?.jsonPrimitiveOrNull()?.contentOrNull != "tool_use") return null
-            return (values["id"]?.jsonPrimitiveOrNull()?.contentOrNull ?: "tool") to (values["name"]?.jsonPrimitiveOrNull()?.contentOrNull ?: "function")
+        suspend fun completeObserver() {
+            val item = claudeMessageItems(claudeNativeAssistantMessage(JsonArray(listOf(toJson()))), output).firstOrNull() ?: return
+            val id = observerItemId ?: "item_$index"
+            if (completedIds.add(id)) observer?.onEvent(TurnEvent.ItemCompleted(id, item))
         }
 
         fun toJson(): JsonObject {
@@ -300,9 +319,7 @@ private fun claudeNativeAssistantMessage(content: JsonArray) = buildJsonObject {
     put("content", content)
 }
 
-private fun ClaudeLaneB.tidyAfterAppend(): ClaudeLaneB {
-    return copy(messages = messages.tidyLatestClaudeWave())
-}
+private fun ClaudeLaneB.tidyAfterAppend() = copy(messages = messages.tidyLatestClaudeWave())
 
 private data class ClaudeWaveRange(val start: Int, val endExclusive: Int)
 
@@ -315,6 +332,7 @@ private fun List<JsonObject>.tidyLatestClaudeWave(): List<JsonObject> {
 
 private fun List<JsonObject>.latestClaudeWaveRange(): ClaudeWaveRange? {
     if (lastOrNull()?.isClaudeFinalAssistant() != true) return null
+
     var start = indexOfLast { it.string("role") == "user" && !it.hasClaudeToolResult() }.takeIf { it >= 0 } ?: return null
     while (start > 0 && this[start - 1].string("role") == "user" && !this[start - 1].hasClaudeToolResult()) start--
     return ClaudeWaveRange(start, size)
